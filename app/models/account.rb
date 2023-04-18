@@ -24,6 +24,7 @@ class Account < ActiveRecord::Base
   include Context
   include OutcomeImportContext
   include Pronouns
+  include SearchTermHelper
 
   INSTANCE_GUID_SUFFIX = "canvas-lms"
   # a list of columns necessary for validation and save callbacks to work on a slim object
@@ -75,6 +76,7 @@ class Account < ActiveRecord::Base
            -> { ordered },
            inverse_of: :account,
            extend: AuthenticationProvider::FindWithType
+  has_many :calendar_events, -> { where("calendar_events.workflow_state<>'cancelled'") }, as: :context, inverse_of: :context, dependent: :destroy
 
   has_many :account_reports, inverse_of: :account
   has_many :grading_standards, -> { where("workflow_state<>'deleted'") }, as: :context, inverse_of: :context
@@ -110,6 +112,10 @@ class Account < ActiveRecord::Base
            foreign_key: "root_account_id",
            class_name: "Auditors::ActiveRecord::FeatureFlagRecord",
            dependent: :destroy,
+           inverse_of: :root_account
+  has_many :auditor_pseudonym_records,
+           foreign_key: "root_account_id",
+           class_name: "Auditors::ActiveRecord::PseudonymRecord",
            inverse_of: :root_account
   has_many :lti_resource_links,
            as: :context,
@@ -157,8 +163,6 @@ class Account < ActiveRecord::Base
   after_update :clear_cached_short_name, if: :saved_change_to_name?
 
   after_create :create_default_objects
-
-  after_save :log_changes_to_app_center_access_token
 
   serialize :settings, Hash
   include TimeZoneHelper
@@ -355,7 +359,6 @@ class Account < ActiveRecord::Base
 
   # privacy settings for root accounts
   add_setting :enable_fullstory, boolean: true, root_only: true, default: true
-  add_setting :enable_google_analytics, boolean: true, root_only: true, default: true
 
   add_setting :rce_favorite_tool_ids, inheritable: true
 
@@ -366,6 +369,12 @@ class Account < ActiveRecord::Base
   add_setting :allow_last_page_on_course_users, boolean: true, root_only: true, default: false
   add_setting :allow_last_page_on_account_courses, boolean: true, root_only: true, default: false
   add_setting :allow_last_page_on_users, boolean: true, root_only: true, default: false
+  add_setting :emoji_deny_list, root_only: true
+
+  add_setting :default_due_time, inheritable: true
+  add_setting :conditional_release, default: false, boolean: true, inheritable: true
+  add_setting :enable_search_indexing, boolean: true, root_only: true, default: false
+  add_setting :allow_additional_email_at_registration, boolean: true, root_only: true, default: false
 
   def settings=(hash)
     if hash.is_a?(Hash) || hash.is_a?(ActionController::Parameters)
@@ -384,7 +393,7 @@ class Account < ActiveRecord::Base
                 new_hash[inner_key] = if opts[:inheritable] && (inner_key == :locked || (inner_key == :value && opts[:boolean]))
                                         Canvas::Plugin.value_to_boolean(inner_val)
                                       else
-                                        inner_val.to_s
+                                        inner_val.to_s.presence
                                       end
               end
             end
@@ -392,13 +401,13 @@ class Account < ActiveRecord::Base
           elsif opts[:boolean]
             settings[key] = Canvas::Plugin.value_to_boolean(val)
           else
-            settings[key] = val.to_s
+            settings[key] = val.to_s.presence
           end
         end
       end
     end
     # prune nil or "" hash values to save space in the DB.
-    settings.reject! { |_, value| value.nil? || value == "" }
+    settings.reject! { |_, value| value.nil? || value == { value: nil } || value == { value: nil, locked: false } }
     settings
   end
 
@@ -468,6 +477,10 @@ class Account < ActiveRecord::Base
   def enable_as_k5_account!
     settings[:enable_as_k5_account] = { value: true }
     save!
+  end
+
+  def conditional_release?
+    conditional_release[:value]
   end
 
   def open_registration?
@@ -596,26 +609,26 @@ class Account < ActiveRecord::Base
     if keys_to_clear.any?
       shard.activate do
         self.class.connection.after_transaction_commit do
-          delay_if_production(singleton: "Account#clear_downstream_caches/#{global_id}")
+          delay_if_production(singleton: "Account#clear_downstream_caches/#{global_id}:#{keys_to_clear.join("/")}")
             .clear_downstream_caches(*keys_to_clear, xlog_location: self.class.current_xlog_location)
         end
       end
     end
   end
 
-  def clear_downstream_caches(*key_types, xlog_location: nil, is_retry: false)
+  def clear_downstream_caches(*keys_to_clear, xlog_location: nil, is_retry: false)
     shard.activate do
       if xlog_location
         timeout = Setting.get("account_cache_clear_replication_timeout", "60").to_i.seconds
         unless self.class.wait_for_replication(start: xlog_location, timeout: timeout)
-          delay(run_at: Time.now + timeout, singleton: "Account#clear_downstream_caches/#{global_id}")
+          delay(run_at: Time.now + timeout, singleton: "Account#clear_downstream_caches/#{global_id}:#{keys_to_clear.join("/")}")
             .clear_downstream_caches(*keys_to_clear, xlog_location: xlog_location, is_retry: true)
           # we still clear, but only the first time; after that we just keep waiting
           return if is_retry
         end
       end
 
-      Account.clear_cache_keys([id] + Account.sub_account_ids_recursive(id), *key_types)
+      Account.clear_cache_keys([id] + Account.sub_account_ids_recursive(id), *keys_to_clear)
     end
   end
 
@@ -995,10 +1008,11 @@ class Account < ActiveRecord::Base
 
   def self.account_chain_ids(starting_account_id)
     block = lambda do |_name|
+      original_shard = Shard.current
       Shard.shard_for(starting_account_id).activate do
         id_chain = []
         if starting_account_id.is_a?(Account)
-          id_chain << starting_account_id.id
+          id_chain << Shard.relative_id_for(starting_account_id.id, Shard.current, original_shard)
           starting_account_id = starting_account_id.parent_account_id
         end
 
@@ -1012,7 +1026,7 @@ class Account < ActiveRecord::Base
               )
               SELECT id FROM t
             SQL
-            id_chain.concat(ids.map(&:to_i))
+            id_chain.concat(ids.map { |id| Shard.relative_id_for(id, Shard.current, original_shard) })
           end
         end
         id_chain
@@ -1023,25 +1037,25 @@ class Account < ActiveRecord::Base
   end
 
   def self.multi_account_chain_ids(starting_account_ids)
-    if connection.adapter_name == "PostgreSQL"
-      original_shard = Shard.current
-      Shard.partition_by_shard(starting_account_ids) do |sliced_acc_ids|
-        ids = Account.connection.select_values(<<~SQL.squish)
-          WITH RECURSIVE t AS (
-            SELECT * FROM #{Account.quoted_table_name} WHERE id IN (#{sliced_acc_ids.join(", ")})
-            UNION
-            SELECT accounts.* FROM #{Account.quoted_table_name} INNER JOIN t ON accounts.id=t.parent_account_id
-          )
-          SELECT id FROM t
-        SQL
-        ids.map { |id| Shard.relative_id_for(id, Shard.current, original_shard) }
-      end
-    else
-      account_chain(starting_account_id).map(&:id)
+    original_shard = Shard.current
+    Shard.partition_by_shard(starting_account_ids) do |sliced_acc_ids|
+      ids = Account.connection.select_values(sanitize_sql(<<~SQL.squish))
+        WITH RECURSIVE t AS (
+          SELECT * FROM #{Account.quoted_table_name} WHERE id IN (#{sliced_acc_ids.join(", ")})
+          UNION
+          SELECT accounts.* FROM #{Account.quoted_table_name} INNER JOIN t ON accounts.id=t.parent_account_id
+        )
+        SELECT id FROM t
+      SQL
+      ids.map { |id| Shard.relative_id_for(id, Shard.current, original_shard) }
     end
   end
 
   def self.add_federated_parent_to_chain!(chain)
+    chain
+  end
+
+  def self.add_federated_parent_id_to_chain!(chain)
     chain
   end
 
@@ -1059,19 +1073,27 @@ class Account < ActiveRecord::Base
       chain.each_with_index { |a, idx| a.parent_account = chain[idx + 1] if a.parent_account_id == chain[idx + 1]&.id }
     end.freeze
 
-    if include_federated_parent
-      return @account_chain_with_federated_parent ||= Account.add_federated_parent_to_chain!(@account_chain.dup).freeze
-    end
-
+    # This implicitly includes add_federated_parent_to_chain
     if include_site_admin
       return @account_chain_with_site_admin ||= Account.add_site_admin_to_chain!(@account_chain.dup).freeze
+    end
+
+    if include_federated_parent
+      return @account_chain_with_federated_parent ||= Account.add_federated_parent_to_chain!(@account_chain.dup).freeze
     end
 
     @account_chain
   end
 
-  def account_chain_ids
-    @cached_account_chain_ids ||= Account.account_chain_ids(self)
+  def account_chain_ids(include_federated_parent_id: false)
+    @cached_account_chain_ids ||= Account.account_chain_ids(self).freeze
+
+    if include_federated_parent_id
+      return @cached_account_chain_ids_with_federated_parent ||=
+               Account.add_federated_parent_id_to_chain!(@cached_account_chain_ids.dup).freeze
+    end
+
+    @cached_account_chain_ids
   end
 
   def account_chain_loop
@@ -1116,7 +1138,7 @@ class Account < ActiveRecord::Base
       end
     end
     unless (preload_values = all.preload_values).empty?
-      ActiveRecord::Associations::Preloader.new.preload(result, preload_values)
+      ActiveRecord::Associations.preload(result, preload_values)
     end
     result
   end
@@ -1188,7 +1210,11 @@ class Account < ActiveRecord::Base
   end
 
   def available_custom_roles(include_inactive = false)
-    scope = Role.where(account_id: account_chain_ids)
+    scope = if root_account.primary_settings_root_account?
+              Role.where(account_id: account_chain_ids)
+            else
+              Role.shard(account_chain(include_federated_parent: true).map(&:shard).uniq).where(account: account_chain(include_federated_parent: true))
+            end
     include_inactive ? scope.not_deleted : scope.active
   end
 
@@ -1237,7 +1263,8 @@ class Account < ActiveRecord::Base
   end
 
   def valid_role?(role)
-    role && (role.built_in? || (id == role.account_id) || account_chain_ids.include?(role.account_id))
+    allowed_ids = root_account.primary_settings_root_account? ? account_chain_ids : account_chain(include_federated_parent: true).map(&:id)
+    role && (role.built_in? || (id == role.account_id) || allowed_ids.include?(role.account_id))
   end
 
   def login_handle_name_is_customized?
@@ -1351,7 +1378,7 @@ class Account < ActiveRecord::Base
     end
 
     given { |user| !cached_account_users_for(user).empty? }
-    can :read and can :read_as_admin and can :manage and can :update and can :delete and can :read_outcomes and can :read_terms
+    can %i[read read_as_admin manage update delete read_outcomes read_terms read_files]
 
     given { |user| root_account? && cached_all_account_users_for(user).any? }
     can :read_terms
@@ -1373,7 +1400,7 @@ class Account < ActiveRecord::Base
 
     # any user with an admin enrollment in one of the courses can read
     given { |user| user && courses.where(id: user.enrollments.active.admin.pluck(:course_id)).exists? }
-    can :read
+    can [:read, :read_files]
 
     given { |user| !site_admin? && primary_settings_root_account? && grants_right?(user, :manage_site_settings) }
     can :manage_privacy_settings
@@ -1383,6 +1410,13 @@ class Account < ActiveRecord::Base
         (grants_right?(user, :view_notifications) || Account.site_admin.grants_right?(user, :read_messages))
     end
     can :view_bounced_emails
+
+    given do |user|
+      user &&
+        (user_account_associations.where(user_id: user).exists? || grants_right?(user, :read)) &&
+        (account_calendar_visible || grants_right?(user, :manage_account_calendar_visibility))
+    end
+    can :view_account_calendar_details
   end
 
   def reload(*)
@@ -1771,17 +1805,17 @@ class Account < ActiveRecord::Base
   TAB_SEARCH = 18
   TAB_BRAND_CONFIGS = 19
   TAB_EPORTFOLIO_MODERATION = 20
+  TAB_ACCOUNT_CALENDARS = 21
 
   # site admin tabs
   TAB_PLUGINS = 14
   TAB_JOBS = 15
   TAB_DEVELOPER_KEYS = 16
   TAB_RELEASE_NOTES = 17
-  TAB_JOBS_V2 = 18
 
   def external_tool_tabs(opts, user)
-    tools = ContextExternalTool.active.find_all_for(self, :account_navigation)
-                               .select { |t| t.permission_given?(:account_navigation, user, self) }
+    tools = Lti::ContextToolFinder.new(self, type: :account_navigation).all_tools_scope_union.to_unsorted_array
+                                  .select { |t| t.permission_given?(:account_navigation, user, self) }
     Lti::ExternalToolTab.new(self, :account_navigation, tools, opts[:language]).tabs
   end
 
@@ -1796,7 +1830,6 @@ class Account < ActiveRecord::Base
       tabs << { id: TAB_PLUGINS, label: t("#account.tab_plugins", "Plugins"), css_class: "plugins", href: :plugins_path, no_args: true } if root_account? && grants_right?(user, :manage_site_settings)
       tabs << { id: TAB_RELEASE_NOTES, label: t("Release Notes"), css_class: "release_notes", href: :account_release_notes_manage_path } if root_account? && ReleaseNote.enabled? && grants_right?(user, :manage_release_notes)
       tabs << { id: TAB_JOBS, label: t("#account.tab_jobs", "Jobs"), css_class: "jobs", href: :jobs_path, no_args: true } if root_account? && grants_right?(user, :view_jobs)
-      tabs << { id: TAB_JOBS_V2, label: t("#account.tab_jobs_v2", "Jobs v2"), css_class: "jobs_v2", href: :jobs_v2_index_path, no_args: true } if root_account? && grants_right?(user, :view_jobs) && feature_enabled?(:jobs_v2)
     else
       tabs << { id: TAB_COURSES, label: t("#account.tab_courses", "Courses"), css_class: "courses", href: :account_path } if user && grants_right?(user, :read_course_list)
       tabs << { id: TAB_USERS, label: t("People"), css_class: "users", href: :account_users_path } if user && grants_right?(user, :read_roster)
@@ -1811,6 +1844,7 @@ class Account < ActiveRecord::Base
       tabs << { id: TAB_GRADING_STANDARDS, label: t("#account.tab_grading_standards", "Grading"), css_class: "grading_standards", href: :account_grading_standards_path } if user && grants_right?(user, :manage_grades)
       tabs << { id: TAB_QUESTION_BANKS, label: t("#account.tab_question_banks", "Question Banks"), css_class: "question_banks", href: :account_question_banks_path } if user && grants_any_right?(user, *RoleOverride::GRANULAR_MANAGE_ASSIGNMENT_PERMISSIONS)
       tabs << { id: TAB_SUB_ACCOUNTS, label: t("#account.tab_sub_accounts", "Sub-Accounts"), css_class: "sub_accounts", href: :account_sub_accounts_path } if manage_settings
+      tabs << { id: TAB_ACCOUNT_CALENDARS, label: t("Account Calendars"), css_class: "account_calendars", href: :account_calendar_settings_path } if user && grants_right?(user, :manage_account_calendar_visibility)
       tabs << { id: TAB_FACULTY_JOURNAL, label: t("#account.tab_faculty_journal", "Faculty Journal"), css_class: "faculty_journal", href: :account_user_notes_path } if enable_user_notes && user && grants_right?(user, :manage_user_notes)
       tabs << { id: TAB_TERMS, label: t("#account.tab_terms", "Terms"), css_class: "terms", href: :account_terms_path } if root_account? && manage_settings
       tabs << { id: TAB_AUTHENTICATION, label: t("#account.tab_authentication", "Authentication"), css_class: "authentication", href: :account_authentication_providers_path } if root_account? && manage_settings
@@ -2037,8 +2071,8 @@ class Account < ActiveRecord::Base
     :closed
   end
 
-  scope :root_accounts, -> { where(root_account_id: [0, nil]).where.not(id: 0) }
-  scope :non_root_accounts, -> { where.not(root_account_id: [0, nil]) }
+  scope :root_accounts, -> { where("(accounts.root_account_id = 0 OR accounts.root_account_id IS NULL) AND accounts.id != 0") }
+  scope :non_root_accounts, -> { where("(accounts.root_account_id != 0 AND accounts.root_account_id IS NOT NULL)") }
   scope :processing_sis_batch, -> { where.not(accounts: { current_sis_batch_id: nil }).order(:updated_at) }
   scope :name_like, ->(name) { where(wildcard("accounts.name", name)) }
   scope :active, -> { where("accounts.workflow_state<>'deleted'") }
@@ -2268,8 +2302,8 @@ class Account < ActiveRecord::Base
 
   def get_rce_favorite_tool_ids
     rce_favorite_tool_ids[:value] ||
-      ContextExternalTool.all_tools_for(self, placements: [:editor_button]) # TODO: remove after datafixup and the is_rce_favorite column is removed
-                         .where(is_rce_favorite: true).pluck(:id).map { |id| Shard.global_id_for(id) }
+      Lti::ContextToolFinder.all_tools_for(self, placements: [:editor_button]) # TODO: remove after datafixup and the is_rce_favorite column is removed
+                            .where(is_rce_favorite: true).pluck(:id).map { |id| Shard.global_id_for(id) }
   end
 
   def effective_course_template
@@ -2278,20 +2312,6 @@ class Account < ActiveRecord::Base
     return nil if owning_account.course_template_id == 0
 
     owning_account.course_template
-  end
-
-  def log_changes_to_app_center_access_token
-    # Hopefully temporary change to debug how/why token is getting reset
-    was_settings, now_settings = saved_change_to_attribute(:settings)
-    was_token = was_settings.respond_to?(:[]) && was_settings[:app_center_access_token]
-    now_token = now_settings.respond_to?(:[]) && now_settings[:app_center_access_token]
-    if was_token != now_token
-      sentry_notifier = CanvasErrors.send(:registry)[:sentry_notification]
-      if sentry_notifier
-        data = { account_id: global_id, was_set: !!was_token.presence, now_set: !!now_token.presence }
-        sentry_notifier.call("Account's app_center_access_token changed", data, :warn)
-      end
-    end
   end
 
   def student_reporting?

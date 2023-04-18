@@ -36,7 +36,7 @@ class Quizzes::Quiz < ActiveRecord::Base
   include LockedFor
 
   attr_readonly :context_id, :context_type
-  attr_accessor :notify_of_update
+  attr_accessor :notify_of_update, :saved_by, :saved_by_new_quizzes_migration
 
   has_many :quiz_questions, -> { order(:position) }, dependent: :destroy, class_name: "Quizzes::QuizQuestion", inverse_of: :quiz
   has_many :quiz_submissions, dependent: :destroy, class_name: "Quizzes::QuizSubmission"
@@ -59,6 +59,7 @@ class Quizzes::Quiz < ActiveRecord::Base
   validates :points_possible, numericality: { less_than_or_equal_to: 2_000_000_000, allow_nil: true }
   validate :validate_quiz_type, if: :quiz_type_changed?
   validate :validate_ip_filter, if: :ip_filter_changed?
+  validate :validate_time_limit, if: :time_limit_changed?
   validate :validate_hide_results, if: :hide_results_changed?
   validate :validate_correct_answer_visibility, if: lambda { |quiz|
     quiz.show_correct_answers_at_changed? ||
@@ -208,7 +209,7 @@ class Quizzes::Quiz < ActiveRecord::Base
     # There is no need to create a new assignment if the quiz being deleted
     return if workflow_state == "deleted"
 
-    if !assignment_id && graded? && (force || !%i[assignment clone migration].include?(@saved_by))
+    if !assignment_id && (graded? || (force && survey?)) && (force || !%i[assignment clone migration].include?(@saved_by))
       assignment = self.assignment
       assignment ||= context.assignments.build(title: title, due_at: due_at, submission_types: "online_quiz")
       assignment.assignment_group_id = self.assignment_group_id
@@ -284,10 +285,12 @@ class Quizzes::Quiz < ActiveRecord::Base
   alias_method :destroy_permanently!, :destroy
 
   def destroy
+    ContentTag.delete_for(self)
     self.workflow_state = "deleted"
     self.deleted_at = Time.now.utc
     res = save!
     if for_assignment? && !assignment.deleted?
+      assignment.skip_downstream_changes! if @skip_downstream_changes
       assignment.destroy
     end
     res
@@ -435,12 +438,13 @@ class Quizzes::Quiz < ActiveRecord::Base
     end
   end
 
-  attr_accessor :saved_by
-
   def update_assignment
     delay_if_production.set_unpublished_question_count if id
     if !assignment_id && @old_assignment_id
-      context_module_tags.preload(context_module: :content_tags).each(&:confirm_valid_module_requirements)
+      context_module_tags.preload(context_module: :content_tags).find_each do |cmt|
+        cmt.confirm_valid_module_requirements
+        cmt.update_course_pace_module_items
+      end
     end
     if !graded? && (@old_assignment_id || last_assignment_id)
       ::Assignment.where(
@@ -486,6 +490,7 @@ class Quizzes::Quiz < ActiveRecord::Base
       end
       self.assignment_id = a.id
       Quizzes::Quiz.where(id: self).update_all(assignment_id: a.id)
+      context_module_tags.find_each(&:update_course_pace_module_items)
     end
   end
 
@@ -775,7 +780,7 @@ class Quizzes::Quiz < ActiveRecord::Base
     if opts[:persist] != false
       self.quiz_data = data
 
-      unless survey?
+      unless survey? || saved_by_new_quizzes_migration
         possible = self.class.count_points_possible(data)
         self.points_possible = [possible, 0].max
       end
@@ -946,6 +951,14 @@ class Quizzes::Quiz < ActiveRecord::Base
       ip_filter.split(",").each { |filter| ::IPAddr.new(filter) }
     rescue
       errors.add(:invalid_ip_filter, t("#quizzes.quiz.errors.invalid_ip_filter", "IP filter is not valid"))
+    end
+  end
+
+  def validate_time_limit
+    return if time_limit.blank?
+
+    unless time_limit > 0
+      errors.add(:time_limit, t("#quizzes.quiz.errors.invalid_time_limit", "Time Limit is not valid"))
     end
   end
 
@@ -1182,14 +1195,14 @@ class Quizzes::Quiz < ActiveRecord::Base
             SELECT ao.quiz_id, aos.user_id, ao.due_at, ao.due_at_overridden, 1 AS priority
             FROM #{AssignmentOverride.quoted_table_name} ao
             INNER JOIN #{AssignmentOverrideStudent.quoted_table_name} aos ON ao.id = aos.assignment_override_id AND ao.set_type = 'ADHOC'
-            WHERE aos.user_id = #{User.connection.quote(user)}
+            WHERE aos.user_id = #{User.connection.quote(user.id_for_database)}
               AND ao.workflow_state = 'active'
               AND aos.workflow_state <> 'deleted'
             UNION
             SELECT ao.quiz_id, e.user_id, ao.due_at, ao.due_at_overridden, 1 AS priority
             FROM #{AssignmentOverride.quoted_table_name} ao
             INNER JOIN #{Enrollment.quoted_table_name} e ON e.course_section_id = ao.set_id AND ao.set_type = 'CourseSection'
-            WHERE e.user_id = #{User.connection.quote(user)}
+            WHERE e.user_id = #{User.connection.quote(user.id_for_database)}
               AND e.workflow_state NOT IN ('rejected', 'deleted', 'inactive')
               AND ao.workflow_state = 'active'
             UNION
@@ -1198,7 +1211,7 @@ class Quizzes::Quiz < ActiveRecord::Base
             INNER JOIN #{Enrollment.quoted_table_name} e ON e.course_id = q.context_id
             WHERE e.workflow_state NOT IN ('rejected', 'deleted', 'inactive')
               AND e.type in ('StudentEnrollment', 'StudentViewEnrollment')
-              AND e.user_id = #{User.connection.quote(user)}
+              AND e.user_id = #{User.connection.quote(user.id_for_database)}
               AND q.assignment_id IS NULL
               AND NOT q.only_visible_to_overrides
           ) o
@@ -1438,6 +1451,10 @@ class Quizzes::Quiz < ActiveRecord::Base
 
   def excused_for_student?(student)
     assignment&.submission_for_student(student)&.excused?
+  end
+
+  def is_module_item?
+    context_module_tags.present?
   end
 
   def due_for_any_student_in_closed_grading_period?(periods = nil)

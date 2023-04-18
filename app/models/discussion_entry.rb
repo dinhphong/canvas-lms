@@ -25,6 +25,7 @@ class DiscussionEntry < ActiveRecord::Base
   include SendToStream
   include TextHelper
   include HtmlTextHelper
+  include Api
 
   attr_readonly :discussion_topic_id, :user_id, :parent_id, :is_anonymous_author
   has_many :discussion_entry_drafts, inverse_of: :discussion_entry
@@ -53,6 +54,7 @@ class DiscussionEntry < ActiveRecord::Base
   after_save :update_discussion
   after_save :context_module_action_later
   after_create :create_participants
+  after_create :log_discussion_entry_metrics
   after_create :clear_planner_cache_for_participants
   after_create :update_topic
   validates :message, length: { maximum: maximum_text_length, allow_blank: true }
@@ -81,6 +83,10 @@ class DiscussionEntry < ActiveRecord::Base
 
   def delete_edit_draft(user_id:)
     discussion_entry_drafts.where(user_id: user_id).delete_all
+  end
+
+  def log_discussion_entry_metrics
+    InstStatsd::Statsd.increment("discussion_entry.created")
   end
 
   def parse_and_create_mentions
@@ -557,7 +563,7 @@ class DiscussionEntry < ActiveRecord::Base
   end
 
   def broadcast_report_notification(report_type)
-    return unless Account.site_admin.feature_enabled?(:discussions_reporting)
+    return unless context.feature_enabled?(:react_discussions_post)
 
     to_list = context.instructors_in_charge_of(user_id)
 

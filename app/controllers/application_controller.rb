@@ -32,6 +32,7 @@ class ApplicationController < ActionController::Base
   include Api::V1::User
   include Api::V1::WikiPage
   include LegalInformationHelper
+  include FullStoryHelper
 
   helper :all
 
@@ -49,13 +50,16 @@ class ApplicationController < ActionController::Base
   # make sure authlogic is before load_user
   skip_before_action :activate_authlogic
   prepend_before_action :activate_authlogic
+  before_action :respect_account_privacy
 
   around_action :set_locale
+  around_action :set_timezone
   around_action :enable_request_cache
   around_action :batch_statsd
   around_action :compute_http_cost
 
   before_action :clear_idle_connections
+  before_action :set_normalized_route
   before_action :set_sentry_trace
   before_action :annotate_apm
   before_action :annotate_sentry
@@ -69,6 +73,7 @@ class ApplicationController < ActionController::Base
   before_action :initiate_session_from_token
   before_action :fix_xhr_requests
   before_action :init_body_classes
+  before_action :manage_robots_meta
   # multiple actions might be called on a single controller instance in specs
   before_action :clear_js_env if Rails.env.test?
 
@@ -113,6 +118,10 @@ class ApplicationController < ActionController::Base
     end
   end
 
+  def supported_timezones
+    ActiveSupport::TimeZone.all.map { |tz| tz.tzinfo.name }
+  end
+
   add_crumb(proc do
     title = I18n.t("links.dashboard", "My Dashboard")
     crumb = <<~HTML
@@ -127,6 +136,16 @@ class ApplicationController < ActionController::Base
 
   def clear_js_env
     @js_env = nil
+  end
+
+  def set_normalized_route
+    # Presently used only by Sentry, and not needed for API requests
+    return unless request.format.html? && SentryExtensions::Settings.settings[:frontend_dsn]
+
+    ::Rails.application.routes.router.recognize(request) { |route, _| @route ||= route }
+    return unless @route
+
+    @normalized_route = CGI.unescape(@route.format(@route.parts.excluding(:format).index_with { |part| "{#{part}}" }))
   end
 
   def set_sentry_trace
@@ -184,6 +203,8 @@ class ApplicationController < ActionController::Base
         @js_env = {
           ASSET_HOST: Canvas::Cdn.config.host,
           active_brand_config_json_url: active_brand_config_url("json"),
+          active_brand_config: active_brand_config.as_json(include_root: false),
+          confetti_branding_enabled: Account.site_admin.feature_enabled?(:confetti_branding),
           url_to_what_gets_loaded_inside_the_tinymce_editor_css: editor_css,
           url_for_high_contrast_tinymce_editor_css: editor_hc_css,
           current_user_id: @current_user&.id,
@@ -192,12 +213,11 @@ class ApplicationController < ActionController::Base
           current_user_is_student: @context.respond_to?(:user_is_student?) && @context.user_is_student?(@current_user),
           current_user_types: @current_user.try { |u| u.account_users.active.map { |au| au.role.name } },
           current_user_disabled_inbox: @current_user&.disabled_inbox?,
-          discussions_reporting: Account.site_admin.feature_enabled?(:discussions_reporting),
+          current_user_visited_tabs: @current_user&.get_preference(:visited_tabs),
+          discussions_reporting: react_discussions_post_enabled_for_preferences_use?,
           files_domain: HostUrl.file_host(@domain_root_account || Account.default, request.host_with_port),
           DOMAIN_ROOT_ACCOUNT_ID: @domain_root_account&.global_id,
           k12: k12?,
-          use_responsive_layout: use_responsive_layout?,
-          use_rce_a11y_checker_notifications: @context.try(:feature_enabled?, :rce_a11y_checker_notifications),
           help_link_name: help_link_name,
           help_link_icon: help_link_icon,
           use_high_contrast: @current_user&.prefers_high_contrast?,
@@ -212,23 +232,35 @@ class ApplicationController < ActionController::Base
             open_registration: @domain_root_account&.open_registration?,
             collapse_global_nav: @current_user&.collapse_global_nav?,
             release_notes_badge_disabled: @current_user&.release_notes_badge_disabled?,
-          }
+          },
+          FULL_STORY_ENABLED: fullstory_enabled_for_session?(session),
+          RAILS_ENVIRONMENT: Canvas.environment
         }
+        @js_env[:IN_PACED_COURSE] = @context.enable_course_paces? if @context.try(:enable_course_paces?)
 
         unless SentryExtensions::Settings.settings.blank?
           @js_env[:SENTRY_FRONTEND] = {
             dsn: SentryExtensions::Settings.settings[:frontend_dsn],
-            error_sample_rate: Setting.get("sentry_frontend_errors_sample_rate", "0.0"),
+            org_slug: SentryExtensions::Settings.settings[:org_slug],
+            base_url: SentryExtensions::Settings.settings[:base_url],
+            normalized_route: @normalized_route,
+
+            errors_sample_rate: Setting.get("sentry_frontend_errors_sample_rate", "0.0"),
+            traces_sample_rate: Setting.get("sentry_frontend_traces_sample_rate", "0.0"),
+            url_deny_pattern: Setting.get("sentry_frontend_url_deny_pattern", ""), # regexp
 
             # these values need to correlate with the backend for Sentry features to work properly
-            environment: Canvas.environment,
-            revision: Canvas.revision
+            revision: "canvas-lms@#{Canvas.semver_revision}"
           }
         end
 
         dynamic_settings_tree = DynamicSettings.find(tree: :private)
         if dynamic_settings_tree["api_gateway_enabled"] == "true"
           @js_env[:API_GATEWAY_URI] = dynamic_settings_tree["api_gateway_uri"]
+        end
+
+        if dynamic_settings_tree["frontend_data_collection_endpoint"]
+          @js_env[:DATA_COLLECTION_ENDPOINT] = dynamic_settings_tree["frontend_data_collection_endpoint"]
         end
 
         @js_env[:flashAlertTimeout] = 1.day.in_milliseconds if @current_user&.prefers_no_toast_timeout?
@@ -238,7 +270,8 @@ class ApplicationController < ActionController::Base
 
         direct_share_enabled = !@context.is_a?(Group) && @current_user&.can_content_share?
         if @context.is_a?(Course)
-          direct_share_enabled = @context.grants_right?(@current_user, :read_as_admin)
+          direct_share_enabled = @context.grants_right?(@current_user, session, :manage_content) ||
+                                 (@context.concluded? && @context.grants_right?(@current_user, :read_as_admin))
         end
         @js_env[:DIRECT_SHARE_ENABLED] = direct_share_enabled
         @js_env[:FEATURES] = cached_features.merge(
@@ -249,8 +282,14 @@ class ApplicationController < ActionController::Base
         @js_env[:IS_LARGE_ROSTER] = true if !@js_env[:IS_LARGE_ROSTER] && @context.respond_to?(:large_roster?) && @context.large_roster?
         @js_env[:context_asset_string] = @context.try(:asset_string) unless @js_env[:context_asset_string]
         @js_env[:ping_url] = polymorphic_url([:api_v1, @context, :ping]) if @context.is_a?(Course)
-        @js_env[:TIMEZONE] = Time.zone.tzinfo.identifier unless @js_env[:TIMEZONE]
-        @js_env[:CONTEXT_TIMEZONE] = @context.time_zone.tzinfo.identifier if !@js_env[:CONTEXT_TIMEZONE] && @context.respond_to?(:time_zone) && @context.time_zone.present?
+        if params[:session_timezone].present? && supported_timezones.include?(params[:session_timezone])
+          timezone = context_timezone = params[:session_timezone]
+        else
+          timezone = Time.zone.tzinfo.identifier unless @js_env[:TIMEZONE]
+          context_timezone = @context.time_zone.tzinfo.identifier if !@js_env[:CONTEXT_TIMEZONE] && @context.respond_to?(:time_zone) && @context.time_zone.present?
+        end
+        @js_env[:TIMEZONE] = timezone
+        @js_env[:CONTEXT_TIMEZONE] = context_timezone
         unless @js_env[:LOCALES]
           I18n.set_locale_with_localizer
           @js_env[:LOCALES] = I18n.fallbacks[I18n.locale].map(&:to_s)
@@ -265,6 +304,7 @@ class ApplicationController < ActionController::Base
         @js_env[:K5_USER] = k5_user?
         @js_env[:K5_HOMEROOM_COURSE] = @context.is_a?(Course) && @context.elementary_homeroom_course?
         @js_env[:K5_SUBJECT_COURSE] = @context.is_a?(Course) && @context.elementary_subject_course?
+        @js_env[:LOCALE_TRANSLATION_FILE] = ::Canvas::Cdn.registry.url_for("javascripts/translations/#{@js_env[:LOCALES].first}.json")
       end
     end
 
@@ -277,14 +317,16 @@ class ApplicationController < ActionController::Base
   # put feature checks on Account.site_admin and @domain_root_account that we're loading for every page in here
   # so altogether we can get them faster the vast majority of the time
   JS_ENV_SITE_ADMIN_FEATURES = %i[
-    featured_help_links feature_flag_filters k5_parent_support
-    conferencing_in_planner remember_settings_tab word_count_in_speed_grader observer_picker lti_platform_storage
-    scale_equation_images new_equation_editor buttons_and_icons_cropper
+    featured_help_links
+    lti_platform_storage scale_equation_images new_equation_editor buttons_and_icons_cropper course_paces_for_sections
+    calendar_series account_level_blackout_dates account_calendar_events rce_ux_improvements render_both_to_do_lists
+    course_paces_redesign
   ].freeze
   JS_ENV_ROOT_ACCOUNT_FEATURES = %i[
-    responsive_awareness responsive_misc product_tours files_dnd usage_rights_discussion_topics
+    product_tours files_dnd usage_rights_discussion_topics
     granular_permissions_manage_users create_course_subaccount_picker
     lti_deep_linking_module_index_menu_modal lti_multiple_assignment_deep_linking buttons_and_icons_root_account
+    extended_submission_state wrap_calendar_event_titles scheduled_page_publication
   ].freeze
   JS_ENV_BRAND_ACCOUNT_FEATURES = [
     :embedded_release_notes
@@ -327,13 +369,17 @@ class ApplicationController < ActionController::Base
   helper_method :render_js_env
 
   # add keys to JS environment necessary for the RCE at the given risk level
-  def rce_js_env(domain: request.host_with_port)
-    rce_env_hash = Services::RichContent.env_for(
+  def rce_js_env_base(domain: request.host_with_port)
+    Services::RichContent.env_for(
       user: @current_user,
       domain: domain,
       real_user: @real_current_user,
       context: @context
     )
+  end
+
+  def rce_js_env(domain: request.host_with_port)
+    rce_env_hash = rce_js_env_base
     if @context.is_a?(Course)
       rce_env_hash[:RICH_CONTENT_FILES_TAB_DISABLED] = !@context.grants_right?(@current_user, session, :read_as_admin) &&
                                                        !tab_enabled?(@context.class::TAB_FILES, no_render: true)
@@ -374,9 +420,9 @@ class ApplicationController < ActionController::Base
 
     context = context.account if context.is_a?(User)
     tools = GuardRail.activate(:secondary) do
-      ContextExternalTool.all_tools_for(context, { placements: type,
-                                                   root_account: @domain_root_account, current_user: @current_user,
-                                                   tool_ids: tool_ids }).to_a
+      Lti::ContextToolFinder.all_tools_for(context, { placements: type,
+                                                      root_account: @domain_root_account, current_user: @current_user,
+                                                      tool_ids: tool_ids }).to_a
     end
 
     tools.select! do |tool|
@@ -417,11 +463,6 @@ class ApplicationController < ActionController::Base
     @domain_root_account&.feature_enabled?(:k12)
   end
   helper_method :k12?
-
-  def use_responsive_layout?
-    @domain_root_account&.feature_enabled?(:responsive_layout)
-  end
-  helper_method :use_responsive_layout?
 
   def grading_periods?
     !!@context.try(:grading_periods?)
@@ -530,8 +571,15 @@ class ApplicationController < ActionController::Base
 
     link_settings = @tag&.link_settings || {}
 
-    tool_dimensions.each do |k, v|
-      tool_dimensions[k] = link_settings[k.to_s] || @tool.settings[k] || v
+    tool_dimensions.each do |k, _v|
+      # it may happen that we get "link_settings"=>{"selection_width"=>"", "selection_height"=>""}
+      if link_settings[k.to_s].present?
+        tool_dimensions[k] = link_settings[k.to_s]
+      elsif @tool.settings[k] && @tool.settings[k] != 0
+        # ContextExternalTool#normalize_sizes! converts settings[:selection_width] and settings[:selection_height] to integer
+        tool_dimensions[k] = @tool.settings[k]
+      end
+
       tool_dimensions[k] = tool_dimensions[k].to_s << "px" unless /%|px/.match?(tool_dimensions[k].to_s)
     end
 
@@ -601,7 +649,12 @@ class ApplicationController < ActionController::Base
   # Let's just not use the new math handling there.
   def use_new_math_equation_handling?
     !(params[:controller] == "quizzes/quizzes" && params[:action] == "edit") &&
-      params[:controller] != "question_banks"
+      params[:controller] != "question_banks" &&
+      params[:controller] != "eportfolio_entries"
+  end
+
+  def user_url(*opts)
+    opts[0] == @current_user ? user_profile_url(@current_user) : super
   end
 
   protected
@@ -631,6 +684,7 @@ class ApplicationController < ActionController::Base
         # as global state on I18n (cleanup failure), we don't want it to
         # explode trying to access a non-existant request.
         context_hash[:session_locale] = session[:locale]
+        context_hash[:session_timezone] = session[:timezone]
         context_hash[:accept_language] = request.headers["Accept-Language"]
       else
         logger.warn("[I18N] localizer executed from context-less controller")
@@ -645,6 +699,11 @@ class ApplicationController < ActionController::Base
     yield if block_given?
   ensure
     I18n.localizer = nil
+  end
+
+  def set_timezone
+    store_session_timezone
+    yield if block_given?
   end
 
   def enable_request_cache(&block)
@@ -691,6 +750,12 @@ class ApplicationController < ActionController::Base
     session[:locale] = locale if supported_locales.include? locale
   end
 
+  def store_session_timezone
+    return unless (timezone = params[:session_timezone])
+
+    session[:timezone] = timezone if supported_timezones.include? params[:session_timezone]
+  end
+
   def init_body_classes
     @body_classes = []
   end
@@ -731,6 +796,14 @@ class ApplicationController < ActionController::Base
     @domain_root_account
   end
 
+  def respect_account_privacy
+    return if login_request?
+
+    return unless @domain_root_account.present? && @domain_root_account.settings[:require_user]
+
+    require_user
+  end
+
   def set_response_headers
     # we can't block frames on the files domain, since files domain requests
     # are typically embedded in an iframe in canvas, but the hostname is
@@ -762,10 +835,6 @@ class ApplicationController < ActionController::Base
       reset_session
       redirect_to login_url
     end
-  end
-
-  def user_url(*opts)
-    opts[0] == @current_user ? user_profile_url(@current_user) : super
   end
 
   def tab_enabled?(id, opts = {})
@@ -1121,6 +1190,11 @@ class ApplicationController < ActionController::Base
       end
       groups = @context.filter_visible_groups_for_user(groups)
 
+      if opts[:include_accounts]
+        account_ids = @current_user.get_preference(:enabled_account_calendars) || []
+        accounts = @current_user.associated_accounts.active.where(id: account_ids, account_calendar_visible: true)
+      end
+
       if opts[:favorites_first]
         favorite_course_ids = @context.favorite_context_ids("Course")
         courses = courses.sort_by { |c| [favorite_course_ids.include?(c.id) ? 0 : 1, Canvas::ICU.collation_key(c.name)] }
@@ -1128,6 +1202,7 @@ class ApplicationController < ActionController::Base
 
       @contexts.concat courses
       @contexts.concat groups
+      @contexts.concat(accounts || [])
     end
 
     include_contexts = opts[:include_contexts] || params[:include_contexts]
@@ -1402,7 +1477,15 @@ class ApplicationController < ActionController::Base
 
   def set_no_cache_headers
     response.headers["Pragma"] = "no-cache"
-    response.headers["Cache-Control"] = "no-cache, no-store"
+    response.headers["Cache-Control"] = if Setting.get("legacy_cache_control", "false") == "true"
+                                          "no-cache, no-store"
+                                        else
+                                          "no-store"
+                                        end
+  end
+
+  def manage_robots_meta
+    @allow_robot_indexing = true if @domain_root_account&.enable_search_indexing? || Setting.get("enable_search_indexing", "false") == "true"
   end
 
   def set_page_view
@@ -1834,6 +1917,7 @@ class ApplicationController < ActionController::Base
                      Account.site_admin.feature_enabled?(:new_quizzes_modules_support) &&
                      @context.grants_right?(@current_user, :manage) &&
                      tag.quiz_lti
+      url_params[:quiz_lti] = true if use_edit_url
       redirect_symbol = use_edit_url ? :edit_context_assignment_url : :context_assignment_url
       redirect_to named_context_url(context, redirect_symbol, tag.content_id, url_params)
     elsif tag.content_type == "WikiPage"
@@ -1863,6 +1947,7 @@ class ApplicationController < ActionController::Base
         render "context_modules/url_show"
       end
     elsif tag.content_type == "ContextExternalTool"
+      timing_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       @tag = tag
 
       if tag.locked_for? @current_user
@@ -1930,7 +2015,8 @@ class ApplicationController < ActionController::Base
                                                         content_tag: @module_tag || tag,
                                                         assignment: @assignment,
                                                         launch: @lti_launch,
-                                                        tool: @tool
+                                                        tool: @tool,
+                                                        launch_url: @resource_url
                                                       })
 
         adapter = if @tool.use_1_3?
@@ -1944,7 +2030,7 @@ class ApplicationController < ActionController::Base
                       return_url: @return_url,
                       expander: variable_expander,
                       opts: opts.merge(
-                        resource_link_for_custom_params: @tag.associated_asset_lti_resource_link
+                        resource_link: @tag.associated_asset_lti_resource_link
                       )
                     )
                   else
@@ -1988,6 +2074,9 @@ class ApplicationController < ActionController::Base
         flash[:error] = t "#application.errors.invalid_external_tool", "Couldn't find valid settings for this link"
         redirect_to named_context_url(context, error_redirect_symbol)
       end
+      timing_end = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      tags = @tool ? { lti_version: @tool.lti_version } : {}
+      InstStatsd::Statsd.timing("lti.content_tag_redirect_time", timing_end - timing_start, tags: tags)
     else
       flash[:error] = t "#application.errors.invalid_tag_type", "Didn't recognize the item type for this tag"
       redirect_to named_context_url(context, error_redirect_symbol)
@@ -2424,7 +2513,7 @@ class ApplicationController < ActionController::Base
   # ensure that the bundle you are requiring isn't simply a dependency of some
   # other bundle.
   #
-  # Bundles are defined in ui/bundles/<bundle>.coffee
+  # Bundles are defined in ui/features/<bundle>.coffee
   #
   # usage: js_bundle :gradebook
   #
@@ -2685,7 +2774,8 @@ class ApplicationController < ActionController::Base
                      "assignments",
                      "discussion_topic",
                      (permissions[:manage] || current_user_has_been_observer_in_this_course) && "all_dates",
-                     permissions[:manage] && "module_ids"
+                     permissions[:manage] && "module_ids",
+                     peer_reviews_for_a2_enabled? && "assessment_requests"
                    ].reject(&:blank?),
                    exclude_response_fields: ["description", "rubric"],
                    exclude_assignment_submission_types: ["wiki_page"],
@@ -2865,6 +2955,11 @@ class ApplicationController < ActionController::Base
     DynamicSettings.find(tree: :private)["recaptcha_server_key"].present? && @domain_root_account.self_registration_captcha?
   end
 
+  def peer_reviews_for_a2_enabled?
+    current_user_is_student = @context.respond_to?(:user_is_student?) && @context.user_is_student?(@current_user)
+    current_user_is_student && @context.respond_to?(:feature_enabled?) && @context.feature_enabled?(:peer_reviews_for_a2)
+  end
+
   # Show Student View button on the following controller/action pages, as long as defined tabs are not hidden
   STUDENT_VIEW_PAGES = {
     "courses#show" => nil,
@@ -2920,56 +3015,95 @@ class ApplicationController < ActionController::Base
   end
   helper_method :should_show_migration_limitation_message
 
-  def uncached_k5_user?
-    if @current_user
-      # Collect global ids of all accounts in current region with k5 enabled
-      global_k5_account_ids = []
-      Account.shard(@current_user.in_region_associated_shards).root_accounts.active.non_shadow
-             .where("settings LIKE '%k5_accounts:\n- %'").select(:settings).each do |account|
-        account.settings[:k5_accounts]&.each do |k5_account_id|
-          global_k5_account_ids << Shard.global_id_for(k5_account_id, account.shard)
-        end
+  def uncached_k5_user?(user, course_ids: nil)
+    # Collect global ids of all accounts in current region with k5 enabled
+    global_k5_account_ids = []
+    Account.shard(user.in_region_associated_shards).root_accounts.active.non_shadow
+           .where("settings LIKE '%k5_accounts:\n- %'").select(:settings).each do |account|
+      account.settings[:k5_accounts]&.each do |k5_account_id|
+        global_k5_account_ids << Shard.global_id_for(k5_account_id, account.shard)
       end
-      return false if global_k5_account_ids.blank?
+    end
+    return false if global_k5_account_ids.blank?
 
-      # See if the user has associations with any k5-enabled accounts on each shard
-      k5_associations = Shard.partition_by_shard(global_k5_account_ids) do |k5_account_ids|
-        enrolled_course_ids = @current_user.enrollments.shard(Shard.current).new_or_active_by_date.select(:course_id)
+    provided_global_account_ids = course_ids.present? ? Course.where(id: course_ids).distinct.pluck(:account_id).map { |account_id| Shard.global_id_for(account_id) } : []
+
+    # See if the user has associations with any k5-enabled accounts on each shard
+    k5_associations = Shard.partition_by_shard(global_k5_account_ids) do |k5_account_ids|
+      if course_ids.present?
+        # Use only provided course_ids' account ids if passed
+        provided_account_ids = provided_global_account_ids.select { |account_id| Shard.shard_for(account_id) == Shard.current }.map { |global_id| Shard.local_id_for(global_id)[0] }
+        break true if (provided_account_ids & k5_account_ids).any?
+
+        provided_account_chain_ids = Account.multi_account_chain_ids(provided_account_ids)
+        break true if (provided_account_chain_ids & k5_account_ids).any?
+      else
+        # If course_ids isn't passed, check all their (non-observer and unlinked observer) enrollments and account_users
+        # i.e., ignore observer enrollments with a linked student - the observer picker filters out these courses
+        enrolled_courses_scope = user.enrollments.shard(Shard.current).new_or_active_by_date
+        enrolled_courses_scope = enrolled_courses_scope.not_of_observer_type.or(enrolled_courses_scope.of_observer_type.where(associated_user_id: nil))
+        enrolled_course_ids = enrolled_courses_scope.select(:course_id)
         enrolled_account_ids = Course.where(id: enrolled_course_ids).distinct.pluck(:account_id)
         break true if (enrolled_account_ids & k5_account_ids).any?
 
-        enrolled_account_ids += @current_user.account_users.shard(Shard.current).active.pluck(:account_id)
+        enrolled_account_ids += user.account_users.shard(Shard.current).active.pluck(:account_id)
         break true if (enrolled_account_ids & k5_account_ids).any?
 
         enrolled_account_chain_ids = Account.multi_account_chain_ids(enrolled_account_ids)
         break true if (enrolled_account_chain_ids & k5_account_ids).any?
       end
-      k5_associations == true
-    else
-      # Default to classic canvas if the user isn't logged in
-      false
     end
+    k5_associations == true
   end
 
   def k5_disabled?
     # Only admins and teachers can opt-out of being considered a k5 user
-    can_disable = @current_user.roles(@domain_root_account).any? { |role| %w[admin teacher].include?(role) }
+    # Observers can't disable if they have a student selected in the picker
+    can_disable = @current_user.roles(@domain_root_account).any? { |role| %w[admin teacher].include?(role) } && !currently_observing?
     can_disable && @current_user.elementary_dashboard_disabled?
   end
 
-  def k5_user?(check_disabled = true)
-    RequestCache.cache("k5_user", @current_user, @domain_root_account, check_disabled, @current_user&.elementary_dashboard_disabled?) do
-      if @current_user
-        next false if check_disabled && k5_disabled?
+  def currently_observing?
+    @current_user.roles(@domain_root_account).include?("observer") &&
+      @selected_observed_user.present? &&
+      @selected_observed_user != @current_user
+  end
 
-        # This key is also invalidated when the k5 setting is toggled at the account level or when enrollments change
-        Rails.cache.fetch_with_batched_keys("k5_user", batch_object: @current_user, batched_keys: %i[k5_user enrollments account_users], expires_in: 12.hours) do
-          uncached_k5_user?
-        end
-      else
-        uncached_k5_user?
+  def k5_user?(check_disabled: true)
+    # unauthenticated users get classic canvas
+    return false unless @current_user
+
+    RequestCache.cache("k5_user", @current_user, @selected_observed_user, @domain_root_account, check_disabled, @current_user&.elementary_dashboard_disabled?) do
+      next false if check_disabled && k5_disabled?
+
+      user = @current_user
+      course_ids = nil
+      if currently_observing?
+        user = @selected_observed_user
+        # pass course_ids since we should only consider the subset of courses where the
+        # observer is observing the student when determining k5_user?
+        course_ids = @current_user
+                     .observer_enrollments
+                     .active_or_pending_by_date
+                     .where(associated_user: user)
+                     .shard(@current_user.in_region_associated_shards)
+                     .pluck(:course_id)
+      end
+
+      # This key is also invalidated when the k5 setting is toggled at the account level or when enrollments change
+      Rails.cache.fetch_with_batched_keys(["k5_user3", course_ids].cache_key, batch_object: user, batched_keys: %i[k5_user enrollments account_users], expires_in: 12.hours) do
+        uncached_k5_user?(user, course_ids: course_ids)
       end
     end
   end
   helper_method :k5_user?
+
+  def react_discussions_post_enabled_for_preferences_use?
+    if @context.instance_of?(UserProfile) && Account.default.feature_enabled?(:react_discussions_post)
+      return true
+    end
+
+    @context.respond_to?(:feature_enabled?) && @context.feature_enabled?(:react_discussions_post)
+  end
+  helper_method :react_discussions_post_enabled_for_preferences_use?
 end

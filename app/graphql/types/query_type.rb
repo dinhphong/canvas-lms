@@ -159,5 +159,27 @@ module Types
     def learning_outcome(id:)
       GraphQLNodeLoader.load("LearningOutcome", id, context)
     end
+
+    field :internal_setting, Types::InternalSettingType, null: true do
+      description "Retrieves a single internal setting by its ID or name"
+      argument :id, ID, "a graphql or legacy id", required: false,
+                                                  prepare: GraphQLHelpers.relay_or_legacy_id_prepare_func("InternalSetting")
+      argument :name, String, "the name of the Setting", required: false
+    end
+    def internal_setting(id: nil, name: nil)
+      raise GraphQL::ExecutionError, "Must specify exactly one of id or name" if (id && name) || !(id || name)
+
+      return GraphQLNodeLoader.load("InternalSetting", id, context) if id
+      return GraphQLNodeLoader.load("InternalSettingByName", name, context) if name
+    end
+
+    field :internal_settings, [Types::InternalSettingType], null: true do
+      description "All internal settings"
+    end
+    def internal_settings
+      return [] unless Account.site_admin.grants_right?(context[:current_user], context[:session], :manage_internal_settings)
+
+      Setting.all
+    end
   end
 end

@@ -33,6 +33,7 @@ class MasterCourses::MasterContentTag < ActiveRecord::Base
                                      :calendar_event,
                                      :context_external_tool,
                                      :context_module,
+                                     :course_pace,
                                      :discussion_topic,
                                      :learning_outcome,
                                      :rubric,
@@ -105,5 +106,11 @@ class MasterCourses::MasterContentTag < ActiveRecord::Base
       hash[missing_id] = {}
     end
     hash
+  end
+
+  def quiz_lti_content?
+    return false if content_type != Assignment.to_s
+
+    content.quiz_lti?
   end
 end

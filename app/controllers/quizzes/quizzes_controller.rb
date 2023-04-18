@@ -93,8 +93,12 @@ class Quizzes::QuizzesController < ApplicationController
 
       practice_quizzes   = scoped_quizzes_index.select { |q| q.quiz_type == QUIZ_TYPE_PRACTICE }
       surveys            = scoped_quizzes_index.select { |q| QUIZ_TYPE_SURVEYS.include?(q.quiz_type) }
+      if scoped_new_quizzes_index.any? && @context.grants_any_right?(@current_user, session, *RoleOverride::GRANULAR_MANAGE_ASSIGNMENT_PERMISSIONS)
+        mc_status = setup_master_course_restrictions(scoped_new_quizzes_index, @context)
+      end
       serializer_options = [@context, @current_user, session, {
         permissions: quiz_options,
+        master_course_status: mc_status,
         skip_date_overrides: true,
         skip_lock_tests: true
       }]
@@ -134,7 +138,8 @@ class Quizzes::QuizzesController < ApplicationController
           # TODO: remove this since it's set in application controller
           # Will need to update consumers of this in the UI to bring down
           # this permissions check as well
-          DIRECT_SHARE_ENABLED: can_manage || @context.grants_right?(@current_user, session, :read_as_admin),
+          DIRECT_SHARE_ENABLED: @context.grants_right?(@current_user, session, :manage_content) ||
+                                (@context.is_a?(Course) && @context.concluded? && @context.grants_right?(@current_user, session, :read_as_admin)),
         },
         quiz_menu_tools: external_tools_display_hashes(:quiz_menu),
         quiz_index_menu_tools: (if @domain_root_account&.feature_enabled?(:commons_favorites)
@@ -360,7 +365,8 @@ class Quizzes::QuizzesController < ApplicationController
         VALID_DATE_RANGE: CourseDateRange.new(@context),
         HAS_GRADING_PERIODS: @context.grading_periods?,
         MAX_NAME_LENGTH_REQUIRED_FOR_ACCOUNT: max_name_length_required_for_account,
-        MAX_NAME_LENGTH: max_name_length
+        MAX_NAME_LENGTH: max_name_length,
+        IS_MODULE_ITEM: @quiz.is_module_item?
       }
 
       if @context.grading_periods?
@@ -372,6 +378,7 @@ class Quizzes::QuizzesController < ApplicationController
       end
 
       append_sis_data(hash)
+      append_default_due_time_js_env(@context, hash)
       js_env(hash)
 
       conditional_release_js_env(@quiz.assignment)
@@ -757,7 +764,6 @@ class Quizzes::QuizzesController < ApplicationController
                   !check_lockdown_browser(:medium, named_context_url(@context, "context_quiz_history_url", @quiz.to_param, viewing: "1", version: params[:version]))
 
         js_bundle :quiz_history
-        @google_analytics_page_title = @quiz.survey? ? "User's Survey History" : "User's Quiz History"
         render stream: can_stream_template?
       end
     end
@@ -1146,6 +1152,8 @@ class Quizzes::QuizzesController < ApplicationController
   end
 
   def quiz_engine_selection
+    return "true" if new_quizzes_by_default?
+
     selection = nil
     if @context.is_a?(Course) && @context.settings.dig(:engine_selected, :user_id)
       selection_obj = @context.settings.dig(:engine_selected, :user_id)
@@ -1154,5 +1162,6 @@ class Quizzes::QuizzesController < ApplicationController
       end
       selection
     end
+    selection
   end
 end

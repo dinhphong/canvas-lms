@@ -127,8 +127,8 @@ class AccountNotification < ActiveRecord::Base
             announcement.enrollment_role_ids(user, account_ids: sub_account_ids_map[global_account_id])
           end
           # preload role objects for those enrollments and account users
-          ActiveRecord::Associations::Preloader.new.preload(enrollments, [:role])
-          ActiveRecord::Associations::Preloader.new.preload(account_users, [:role])
+          ActiveRecord::Associations.preload(enrollments, [:role])
+          ActiveRecord::Associations.preload(account_users, [:role])
 
           # map to role ids. user role.id instead of role_id to trigger Role#id
           # magic for built in roles. announcements intended for users not
@@ -361,7 +361,7 @@ class AccountNotification < ActiveRecord::Base
       user_ids = Set.new
       get_everybody = roles.empty?
 
-      course_roles = roles.select(&:course_role?).map { |r| r.role_for_root_account_id(account.resolved_root_account_id) }
+      course_roles = roles.compact.select(&:course_role?).map { |r| r.role_for_root_account_id(account.resolved_root_account_id) }
       if get_everybody || course_roles.any?
         Course.find_ids_in_ranges do |min_id, max_id|
           course_ids = Course.active.where(id: min_id..max_id, account_id: all_account_ids).pluck(:id)
@@ -375,13 +375,18 @@ class AccountNotification < ActiveRecord::Base
         end
       end
 
-      account_roles = roles.select(&:account_role?).map { |r| r.role_for_root_account_id(account.resolved_root_account_id) }
+      account_roles = roles.compact.select(&:account_role?).map { |r| r.role_for_root_account_id(account.resolved_root_account_id) }
       if get_everybody || account_roles.any?
         AccountUser.find_ids_in_ranges do |min_id, max_id|
           scope = AccountUser.where(id: min_id..max_id).active.where(account_id: all_account_ids)
           scope = scope.where(role_id: account_roles) unless get_everybody
           user_ids += scope.distinct.pluck(:user_id)
         end
+      end
+
+      if roles.include?(nil)
+        users_with_no_enrollments_from_given_accounts = User.joins(:user_account_associations).where(user_account_associations: { account_id: all_account_ids }).where.not(id: Enrollment.active_or_pending_by_date.select(:user_id))
+        user_ids += users_with_no_enrollments_from_given_accounts.pluck(:id)
       end
       user_ids.to_a.sort
     end

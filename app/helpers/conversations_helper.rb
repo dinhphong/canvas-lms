@@ -56,6 +56,12 @@ module ConversationsHelper
       raise ConversationsHelper::Error.new(message: I18n.t("Too many participants for group conversation"), status: :bad_request, attribute: "recipients")
     end
 
+    invalid_recipients = get_invalid_recipients(context, recipients, current_user)
+    unless invalid_recipients.to_a.empty?
+      invalid_recipients = invalid_recipients.map { |rec| rec[1] }
+      raise ConversationsHelper::Error.new(message: I18n.t("The following recipients have no active enrollment in the course, %{invalid_recipients}, unable to send messages", invalid_recipients: invalid_recipients), status: :unauthorized, attribute: "recipients")
+    end
+
     tags = infer_tags(
       recipients: conversation.conversation.participants.pluck(:id),
       context_code: context_code
@@ -74,12 +80,12 @@ module ConversationsHelper
 
     if conversation.should_process_immediately?
       message = conversation.process_new_message(message_args, recipients, message_ids, tags)
-      { message: message, status: :ok }
+      { message: message, recipients_count: recipients ? recipients.count : 0, status: :ok }
     else
       conversation.delay(strand: "add_message_#{conversation.global_conversation_id}").process_new_message(message_args, recipients, message_ids, tags)
       # The message is delayed and will be processed later so there is nothing to return
       # right now. If there is no error, success can be assumed.
-      { message: nil, status: :accepted }
+      { message: nil, recipients_count: recipients ? recipients.count : 0, status: :accepted }
     end
   rescue ConversationsHelper::InvalidMessageForConversationError
     raise ConversationsHelper::Error.new(message: I18n.t("not for this conversation"), status: :bad_request, attribute: "included_messages")
@@ -161,6 +167,13 @@ module ConversationsHelper
     @recipients = known.uniq(&:id)
     @recipients.reject! { |u| u.id == current_user.id } unless @recipients == [current_user] && recipients.count == 1
     @recipients
+  end
+
+  def get_invalid_recipients(context, recipients, current_user)
+    if context.is_a?(Course) && context.available? && !recipients.nil? && (context.user_is_student?(current_user) && !context.user_is_instructor?(current_user) && !context.user_is_admin?(current_user))
+      valid_student_recipients = context.current_users.pluck(:id, :name)
+      recipients.map { |recipient| [recipient.id, recipient.name] } - valid_student_recipients
+    end
   end
 
   def all_recipients_are_instructors?(context, recipients)

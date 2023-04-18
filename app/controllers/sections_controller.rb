@@ -96,7 +96,7 @@ class SectionsController < ApplicationController
   # @API List course sections
   # A paginated list of the list of sections for this course.
   #
-  # @argument include[] [String, "students"|"avatar_url"|"enrollments"|"total_students"|"passback_status"]
+  # @argument include[] [String, "students"|"avatar_url"|"enrollments"|"total_students"|"passback_status"|"permissions"]
   #   - "students": Associations to include with the group. Note: this is only
   #     available if you have permission to view users or grades in the course
   #   - "avatar_url": Include the avatar URLs for students returned.
@@ -105,6 +105,8 @@ class SectionsController < ApplicationController
   #   - "total_students": Returns the total amount of active and invited students
   #     for the course section
   #   - "passback_status": Include the grade passback status.
+  #   - "permissions": Include whether section grants :manage_calendar permission
+  #     to the caller
   #
   # @returns [Section]
   def index
@@ -214,9 +216,18 @@ class SectionsController < ApplicationController
   # Move the Section to another course.  The new course may be in a different account (department),
   # but must belong to the same root account (institution).
   #
+  # @argument override_sis_stickiness [boolean]
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
+  #
   # @returns Section
   def crosslist
     @new_course = api_find(@section.root_account.all_courses.not_deleted, params[:new_course_id])
+
+    if params[:override_sis_stickiness] && !value_to_boolean(params[:override_sis_stickiness])
+      return render json: (api_request? ? section_json(@section, @current_user, session, []) : @section)
+    end
+
     if authorized_action(@section, @current_user, :update) && authorized_action(@new_course, @current_user, :manage)
       @section.crosslist_to_course(@new_course, updating_user: @current_user)
       respond_to do |format|
@@ -230,13 +241,17 @@ class SectionsController < ApplicationController
   # @API De-cross-list a Section
   # Undo cross-listing of a Section, returning it to its original course.
   #
+  # @argument override_sis_stickiness [boolean]
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
+  #
   # @returns Section
   def uncrosslist
     @new_course = @section.nonxlist_course
     return render(json: { message: "section is not cross-listed" }, status: :bad_request) if @new_course.nil?
 
     if authorized_action(@section, @current_user, :update) && authorized_action(@new_course, @current_user, :manage)
-      @section.uncrosslist(updating_user: @current_user)
+      @section.uncrosslist(updating_user: @current_user) if !params[:override_sis_stickiness] || value_to_boolean(params[:override_sis_stickiness])
       respond_to do |format|
         flash[:notice] = t("section_decrosslisted", "Section successfully de-cross-listed!")
         format.html { redirect_to named_context_url(@new_course, :context_section_url, @section.id) }
@@ -265,6 +280,10 @@ class SectionsController < ApplicationController
   #
   # @argument course_section[restrict_enrollments_to_section_dates] [Boolean]
   #   Set to true to restrict user enrollments to the start and end dates of the section.
+  #
+  # @argument override_sis_stickiness [boolean]
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
   #
   # @returns Section
   def update
@@ -300,7 +319,7 @@ class SectionsController < ApplicationController
   # @API Get section information
   # Gets details about a specific section
   #
-  # @argument include[] [String, "students"|"avatar_url"|"enrollments"|"total_students"|"passback_status"]
+  # @argument include[] [String, "students"|"avatar_url"|"enrollments"|"total_students"|"passback_status"|"permissions"]
   #   - "students": Associations to include with the group. Note: this is only
   #     available if you have permission to view users or grades in the course
   #   - "avatar_url": Include the avatar URLs for students returned.
@@ -309,6 +328,8 @@ class SectionsController < ApplicationController
   #   - "total_students": Returns the total amount of active and invited students
   #     for the course section
   #   - "passback_status": Include the grade passback status.
+  #   - "permissions": Include whether section grants :manage_calendar permission
+  #     to the caller
   #
   # @returns Section
   def show
@@ -355,6 +376,14 @@ class SectionsController < ApplicationController
   protected
 
   def course_section_params
-    params[:course_section] ? params[:course_section].permit(:name, :start_at, :end_at, :restrict_enrollments_to_section_dates) : {}
+    if params[:course_section]
+      if params[:override_sis_stickiness] && !value_to_boolean(params[:override_sis_stickiness])
+        params[:course_section].permit(:restrict_enrollments_to_section_dates)
+      else
+        params[:course_section].permit(:name, :start_at, :end_at, :restrict_enrollments_to_section_dates)
+      end
+    else
+      {}
+    end
   end
 end

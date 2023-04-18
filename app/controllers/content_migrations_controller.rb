@@ -128,9 +128,10 @@ class ContentMigrationsController < ApplicationController
   include Api::V1::ExternalTools
   include NewQuizzesFeaturesHelper
   include K5Mode
+  include GranularPermissionEnforcement
 
   before_action :require_context
-  before_action :require_auth
+  before_action :authorize_action
 
   # @API List content migrations
   #
@@ -143,8 +144,6 @@ class ContentMigrationsController < ApplicationController
   #
   # @returns [ContentMigration]
   def index
-    return unless authorized_action(@context, @current_user, :manage_content)
-
     Folder.root_folders(@context) # ensure course root folder exists so file imports can run
 
     scope = @context.content_migrations.where(child_subscription_id: nil).order("id DESC")
@@ -159,7 +158,7 @@ class ContentMigrationsController < ApplicationController
 
       options = @plugins.map { |p| { label: p.metadata(:select_text), id: p.id } }
 
-      external_tools = ContextExternalTool.all_tools_for(@context, placements: :migration_selection, root_account: @domain_root_account, current_user: @current_user)
+      external_tools = Lti::ContextToolFinder.all_tools_for(@context, placements: :migration_selection, root_account: @domain_root_account, current_user: @current_user)
       options.concat(external_tools.map do |et|
         {
           id: et.asset_string,
@@ -295,6 +294,9 @@ class ContentMigrationsController < ApplicationController
   # @argument settings[move_to_assignment_group_id] [Integer]
   #   The id of an assignment group in the target course. If provided, all
   #   imported assignments will be moved to the given assignment group.
+  #
+  # @argument settings[importer_skips] [Optional,Array,"all_course_settings"]
+  #   Set of importers to skip, even if otherwise selected by migration settings.
   #
   # @argument date_shift_options[shift_dates] [Boolean]
   #   Whether to shift dates in the copied course
@@ -512,8 +514,19 @@ class ContentMigrationsController < ApplicationController
 
   protected
 
-  def require_auth
-    authorized_action(@context, @current_user, :manage_content)
+  def authorize_action
+    enforce_granular_permissions(
+      @context,
+      overrides: [:manage_content],
+      actions: {
+        index: RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS,
+        show: RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS,
+        available_migrators: RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS,
+        content_list: RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS,
+        create: [:manage_course_content_add],
+        update: [:manage_course_content_edit]
+      }
+    )
   end
 
   def find_migration_plugin(name)

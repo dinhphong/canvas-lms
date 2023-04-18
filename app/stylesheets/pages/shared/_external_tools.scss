@@ -49,26 +49,10 @@ $app_height: 143px;
 }
 
 #external_tools {
-  .AddExternalToolButton{
+  .AddExternalToolButton {
     display: flex;
   }
 
-  .page-header{
-    display: flex;
-  }
-
-  .externalApps_label_text{
-    flex: 1 1;
-  }
-  .externalApps_buttons_container{
-    display: flex;
-    justify-content: flex-end;
-    flex: 2 2;
-  }
-
-  h2 {
-    margin: 10px 0;
-  }
   p.description {
     margin-bottom: 15px;
   }
@@ -150,10 +134,13 @@ $app_height: 143px;
           height: 20px;
           #{direction(right)}: 0;
           z-index: 100;
-          color: #adadad;
+          color: #757575;
           text-align: direction(right);
           padding-#{direction(right)}: 5px;
           font-size: 0.9em;
+        }
+        .showing-details .installed-ribbon {
+          color: #909090;
         }
         .banner_image {
           width: $app_width - 40;
@@ -169,7 +156,8 @@ $app_height: 143px;
           height: $app_height;
           background-color: black;
           color: white;
-          display: none;
+          opacity: 0;
+          transition: opacity 200ms;
           .content {
             padding: 15px;
             .name {
@@ -181,6 +169,11 @@ $app_height: 143px;
               @include fontSize(11px);
               line-height: $ic-line-height;
             }
+          }
+        }
+        &:focus, &:hover {
+          .details {
+            opacity: 0.85;
           }
         }
       }
@@ -300,7 +293,8 @@ fieldset.rate_app_wrapper {
   }
 }
 
-.ExternalAppsRoot, .ReactModal__Content--canvas {
+.ExternalAppsRoot,
+.ReactModal__Content--canvas {
   .control-group {
     margin-bottom: 2px;
   }

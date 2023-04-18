@@ -136,12 +136,10 @@ class SisBatch < ActiveRecord::Base
     self.class.queue_job_for_account(account)
   end
 
-  def enable_diffing(data_set_id, opts = {})
+  def enable_diffing(data_set_identifier, is_remaster)
     if data[:import_type] == "instructure_csv"
-      self.diffing_data_set_identifier = data_set_id
-      if opts[:remaster]
-        self.diffing_remaster = true
-      end
+      self.diffing_data_set_identifier = data_set_identifier
+      self.diffing_remaster = is_remaster
     end
   end
 
@@ -183,21 +181,23 @@ class SisBatch < ActiveRecord::Base
   # once no SisBatch#process_without_send_later jobs are being created anymore, we
   # can rename this to something more sensible.
   def process_without_send_later
+    return_after_transaction = false
     self.class.transaction do
-      if workflow_state == "aborted"
+      case workflow_state
+      when "aborted"
         self.progress = 100
         save
-        return
-      end
-      if workflow_state == "created"
+        return_after_transaction = true
+      when "created"
         self.workflow_state = :importing
         self.progress = 0
         self.started_at = Time.now.utc
         save
       else
-        return
+        return_after_transaction = true
       end
     end
+    return if return_after_transaction
 
     import_scheme = SisBatch.valid_import_types[data[:import_type]]
     if import_scheme.nil?
@@ -331,6 +331,7 @@ class SisBatch < ActiveRecord::Base
     current_file_size = compute_file_size(@data_file)
     previous_zip_size = compute_file_size(previous_zip)
     if change_threshold && file_diff_percent(current_file_size, previous_zip_size) > change_threshold
+      self.diffing_threshold_exceeded = true
       SisBatch.add_error(nil, "Diffing not performed because file size difference exceeded threshold", sis_batch: self)
       return
     end
@@ -342,9 +343,12 @@ class SisBatch < ActiveRecord::Base
 
     if diff_row_count_threshold && diff[:row_count] > diff_row_count_threshold
       diffed_data_file.close
+      self.diffing_threshold_exceeded = true
       SisBatch.add_error(nil, "Diffing not performed because difference row count exceeded threshold", sis_batch: self)
       return
     end
+
+    self.diffing_threshold_exceeded = false
 
     self.data[:diffed_against_sis_batch_id] = previous_batch.id
 
@@ -704,6 +708,7 @@ class SisBatch < ActiveRecord::Base
       "update_sis_id_if_login_claimed" => options[:update_sis_id_if_login_claimed],
       "clear_sis_stickiness" => options[:clear_sis_stickiness],
       "diffing_data_set_identifier" => diffing_data_set_identifier,
+      "diffing_remaster" => diffing_remaster,
       "diffed_against_import_id" => options[:diffed_against_sis_batch_id],
       "diffing_drop_status" => options[:diffing_drop_status],
       "skip_deletes" => options[:skip_deletes],
@@ -712,6 +717,7 @@ class SisBatch < ActiveRecord::Base
     }
     data["processing_errors"] = processing_errors if processing_errors.present?
     data["processing_warnings"] = processing_warnings if processing_warnings.present?
+    data["diffing_threshold_exceeded"] = diffing_threshold_exceeded if diffing_data_set_identifier
     data
   end
 

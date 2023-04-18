@@ -23,7 +23,7 @@ class WebConference < ActiveRecord::Base
   include TextHelper
   attr_readonly :context_id, :context_type
   belongs_to :context, polymorphic: %i[course group account]
-  has_one :calendar_event, inverse_of: :web_conference, dependent: :nullify
+  has_one :calendar_event, -> { order("updated_at desc") }, inverse_of: :web_conference, dependent: :nullify
   has_many :web_conference_participants
   has_many :users, through: :web_conference_participants
   has_many :invitees, -> { where(web_conference_participants: { participation_type: "invitee" }) }, through: :web_conference_participants, source: :user
@@ -32,6 +32,7 @@ class WebConference < ActiveRecord::Base
 
   validates :description, length: { maximum: maximum_text_length, allow_blank: true }
   validates :conference_type, :title, :context_id, :context_type, :user_id, presence: true
+  validates :title, length: { within: 0..255 }
   validate :lti_tool_valid, if: -> { conference_type == "LtiConference" }
 
   MAX_DURATION = 99_999_999
@@ -204,9 +205,11 @@ class WebConference < ActiveRecord::Base
   set_broadcast_policy do |p|
     p.dispatch :web_conference_invitation
     p.to do
-      @new_participants.select do |participant|
+      notification_recipients = @new_participants.select do |participant|
         context.membership_for_user(participant).try(:active?)
       end
+      @new_participants = []
+      notification_recipients
     end
     p.whenever { context_is_available? && @new_participants && !@new_participants.empty? }
     p.data { course_broadcast_data }
@@ -308,7 +311,9 @@ class WebConference < ActiveRecord::Base
     self.conference_type ||= config && config[:conference_type]
     self.context_code = "#{context_type.underscore}_#{context_id}" rescue nil
     self.added_user_ids ||= ""
-    self.title ||= context.is_a?(Course) ? t("#web_conference.default_name_for_courses", "Course Web Conference") : t("#web_conference.default_name_for_groups", "Group Web Conference")
+    if title.blank?
+      self.title = context.is_a?(Course) ? t("#web_conference.default_name_for_courses", "Course Web Conference") : t("#web_conference.default_name_for_groups", "Group Web Conference")
+    end
     self.start_at ||= self.started_at
     self.end_at ||= ended_at
     self.end_at ||= self.start_at + duration.minutes if self.start_at && duration
@@ -451,6 +456,12 @@ class WebConference < ActiveRecord::Base
     has_advanced_settings? ? 1 : 0
   end
 
+  def has_calendar_event
+    return 0 if calendar_event.nil?
+
+    calendar_event.workflow_state == "deleted" ? 0 : 1
+  end
+
   scope :after, ->(date) { where("web_conferences.start_at IS NULL OR web_conferences.start_at>?", date) }
 
   set_policy do
@@ -466,10 +477,42 @@ class WebConference < ActiveRecord::Base
     given { |user, session| user && user.id == user_id && context.grants_right?(user, session, :create_conferences) }
     can :initiate and can :close
 
-    given { |user, session| context.grants_all_rights?(user, session, :manage_content, :create_conferences) }
+    #################### Begin legacy permission block #########################
+    given do |user, session|
+      user && !context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_all_rights?(user, session, :manage_content, :create_conferences)
+    end
     can :read and can :join and can :initiate and can :delete and can :close and can :manage_recordings
 
-    given { |user, session| context.grants_all_rights?(user, session, :manage_content, :create_conferences) && !finished? }
+    given do |user, session|
+      user && !context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        !finished? && context.grants_all_rights?(user, session, :manage_content, :create_conferences)
+    end
+    can :update
+    ##################### End legacy permission block ##########################
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_all_rights?(user, session, :manage_course_content_add, :create_conferences)
+    end
+    can :read and can :join and can :initiate
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_all_rights?(user, session, :manage_course_content_delete, :create_conferences)
+    end
+    can :read and can :join and can :delete and can :close
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_all_rights?(user, session, :manage_course_content_edit, :create_conferences)
+    end
+    can :read and can :join and can :manage_recordings
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        !finished? && context.grants_all_rights?(user, session, :manage_course_content_edit, :create_conferences)
+    end
     can :update
   end
 
@@ -498,8 +541,8 @@ class WebConference < ActiveRecord::Base
   def as_json(options = {})
     url = options.delete(:url)
     join_url = options.delete(:join_url)
-    options.reverse_merge!(only: %w[id title description conference_type duration started_at ended_at user_ids context_id context_type context_code])
-    result = super(options.merge(include_root: false, methods: %i[has_advanced_settings long_running user_settings recordings]))
+    options.reverse_merge!(only: %w[id title description conference_type duration started_at ended_at user_ids context_id context_type context_code start_at end_at])
+    result = super(options.merge(include_root: false, methods: %i[has_advanced_settings has_calendar_event long_running user_settings recordings]))
     result["url"] = url
     result["join_url"] = join_url
     result
@@ -528,7 +571,7 @@ class WebConference < ActiveRecord::Base
   end
 
   def self.lti_tools(context)
-    ContextExternalTool.all_tools_for(context, placements: :conference_selection) || []
+    Lti::ContextToolFinder.new(context, placements: :conference_selection).all_tools_sorted_array
   end
 
   def self.plugins

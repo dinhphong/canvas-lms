@@ -200,20 +200,26 @@ class GradeSummaryPresenter
   end
 
   def submissions
+    preload_params = [
+      :visible_submission_comments,
+      { rubric_assessments: [:rubric, :rubric_association] },
+      :content_participations,
+      { assignment: [:context, :post_policy] }
+    ]
+
+    if Account.site_admin.feature_enabled?(:visibility_feedback_student_grades_page)
+      preload_params << { submission_comments: :viewed_submission_comments }
+    end
+
     @submissions ||= begin
       ss = @context.submissions
-                   .preload(
-                     :visible_submission_comments,
-                     { rubric_assessments: [:rubric, :rubric_association] },
-                     :content_participations,
-                     { assignment: [:context, :post_policy] }
-                   )
+                   .preload(*preload_params)
                    .joins(:assignment)
                    .where("assignments.workflow_state != 'deleted'")
                    .where(user_id: student).to_a
 
       if vericite_enabled? || turnitin_enabled?
-        ActiveRecord::Associations::Preloader.new.preload(ss, :originality_reports)
+        ActiveRecord::Associations.preload(ss, :originality_reports)
       end
 
       assignments_index = assignments.index_by(&:id)
@@ -243,7 +249,14 @@ class GradeSummaryPresenter
   end
 
   def assignment_stats
-    @stats ||= ScoreStatistic.where(assignment: @context.assignments.active.except(:order)).index_by(&:assignment_id)
+    @assignment_stats ||= begin
+      res = ScoreStatistic.where(assignment: @context.assignments.active.except(:order)).index_by(&:assignment_id)
+      # We must have encountered an *old* assignment; enqueue a refresh
+      if res.any? { |_, stat| stat.median.nil? }
+        ScoreStatisticsGenerator.update_score_statistics_in_singleton(@context)
+      end
+      res
+    end
   end
 
   def assignment_presenters
@@ -290,13 +303,20 @@ class GradeSummaryPresenter
 
   def unread_submission_ids
     @unread_submission_ids ||= if student_is_user?
-                                 # remember unread submissions and then mark all as read
                                  subs = submissions.select { |s| s.unread?(@current_user) }
-                                 subs.each { |s| s.change_read_state("read", @current_user) }
                                  subs.map(&:id)
                                else
                                  []
                                end
+  end
+
+  def unread_submission_items
+    @unread_submission_items ||= if student_is_user?
+                                   participations = submissions.map(&:content_participations).flatten
+                                   ContentParticipation.items_by_submission(participations, "unread")
+                                 else
+                                   {}
+                                 end
   end
 
   def no_calculations?

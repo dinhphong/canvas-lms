@@ -511,7 +511,7 @@ class Conversation < ActiveRecord::Base
   end
 
   def subscribed_participants
-    ActiveRecord::Associations::Preloader.new.preload(conversation_participants, :user) unless ModelCache[:users]
+    ActiveRecord::Associations.preload(conversation_participants, :user) unless ModelCache[:users]
     conversation_participants.select(&:subscribed?).filter_map(&:user)
   end
 
@@ -766,6 +766,11 @@ class Conversation < ActiveRecord::Base
     return true if context.nil?
 
     course = context.is_a?(Course) ? context : context.context
+
+    # Can not reply if the course is hard or soft concluded
+    if course.is_a?(Course) && (course.workflow_state == "completed" || course.soft_concluded?)
+      return true
+    end
 
     # can still reply if a teacher is involved
     if (course.is_a?(Course) && conversation_participants.where(user_id: participants_user_ids).where(user_id: course.admin_enrollments.active.select(:user_id)).exists?) ||

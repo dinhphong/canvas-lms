@@ -86,6 +86,8 @@ class CanvasSchema < GraphQL::Schema
         Types::ModuleItemType
       end
     when ContextExternalTool then Types::ExternalToolType
+    when Setting then Types::InternalSettingType
+    when AssessmentRequest then Types::AssessmentRequestType
     end
   end
 
@@ -97,7 +99,8 @@ class CanvasSchema < GraphQL::Schema
 
   orphan_types [Types::PageType, Types::FileType, Types::ExternalUrlType,
                 Types::ExternalToolType, Types::ModuleExternalToolType,
-                Types::ProgressType, Types::ModuleSubHeaderType]
+                Types::ProgressType, Types::ModuleSubHeaderType,
+                Types::InternalSettingType]
 
   def self.for_federation
     @federatable_schema ||= Class.new(CanvasSchema) do

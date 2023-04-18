@@ -40,13 +40,22 @@ class JwtsController < ApplicationController
 
   # @API Create JWT
   #
-  # Create a unique jwt for using with other canvas services
+  # Create a unique jwt for using with other Canvas services
   #
   # Generates a different JWT each time it's called, each one expires
   # after a short window (1 hour)
   #
   # @argument workflows[] [String]
   #   Adds additional data to the JWT to be used by the consuming service workflow
+  #
+  # @argument context_type [Optional, String, "Course"|"User"|"Account"]
+  #   The type of the context in case a specified workflow uses it to consuming the service. Case insensitive.
+  #
+  # @argument context_id [Optional, Integer]
+  #   The id of the context in case a specified workflow uses it to consuming the service.
+  #
+  # @argument context_uuid [Optional, String]
+  #   The uuid of the context in case a specified workflow uses it to consuming the service.
   #
   # @example_request
   #   curl 'https://<canvas>/api/v1/jwts' \
@@ -56,8 +65,24 @@ class JwtsController < ApplicationController
   #
   # @returns JWT
   def create
-    services_jwt = CanvasSecurity::ServicesJwt
-                   .for_user(request.host_with_port, @current_user, real_user: @real_current_user, workflows: params[:workflows])
+    workflows = params[:workflows]
+    if workflows_require_context?(workflows)
+      init_context
+      return render json: { error: @error }, status: :bad_request if @error
+      return render json: { error: "Context not found." }, status: :not_found unless @context
+      return render_unauthorized_action unless @context.grants_any_right?(@current_user, :read)
+    end
+    # TODO: remove this once we teach all consumers to consume the asymmetric ones
+    symmetric = workflows_require_symmetric_encryption?(workflows)
+    domain = request.host_with_port
+    services_jwt = CanvasSecurity::ServicesJwt.for_user(
+      domain,
+      @current_user,
+      real_user: @real_current_user,
+      workflows: workflows,
+      context: @context,
+      symmetric: symmetric
+    )
     render json: { token: services_jwt }
   end
 
@@ -87,16 +112,79 @@ class JwtsController < ApplicationController
         status: :bad_request
       )
     end
+
+    user = @current_user
+    real_user = @real_current_user
+
+    if Account.site_admin.feature_enabled?(:new_quizzes_allow_service_jwt_refresh) && refresh_for_another_user?
+      return render_invalid_refresh unless user_can_refresh?
+
+      user = User.find(decrypted_jwt["sub"])
+      real_user = decrypted_jwt["masq_sub"].present? ? User.find(decrypted_jwt["masq_sub"]) : nil
+    end
+
     services_jwt = CanvasSecurity::ServicesJwt.refresh_for_user(
       params[:jwt],
       request.host_with_port,
-      @current_user,
-      real_user: @real_current_user,
+      user,
+      real_user: real_user,
       # TODO: remove this once we teach all consumers to consume the asymmetric ones
       symmetric: true
     )
     render json: { token: services_jwt }
-  rescue CanvasSecurity::ServicesJwt::InvalidRefresh
+  rescue CanvasSecurity::ServicesJwt::InvalidRefresh, JSON::JWE::DecryptionFailed, JSON::JWT::InvalidFormat
+    render_invalid_refresh
+  end
+
+  private
+
+  def workflows_require_context?(workflows)
+    workflows.is_a?(Array) && workflows.include?("rich_content")
+  end
+
+  def workflows_require_symmetric_encryption?(workflows)
+    # TODO: remove this once we teach the rcs to consume the asymmetric ones
+    workflows.is_a?(Array) && workflows.include?("rich_content")
+  end
+
+  def init_context
+    context_type = params[:context_type]
+    context_id = params[:context_id]
+    context_uuid = params[:context_uuid]
+
+    return @error = "Missing context_type parameter." unless context_type.present?
+    return @error = "Missing context_id or context_uuid parameter." unless context_id.present? || context_uuid.present?
+    return @error = "Should provide context_id or context_uuid parameters, but not both." if context_id.present? && context_uuid.present?
+
+    context_class = Course if context_type.casecmp("Course").zero?
+    context_class = User if context_type.casecmp("User").zero?
+    context_class = Account if context_type.casecmp("Account").zero?
+    return @error = "Invalid context_type parameter." if context_class.nil?
+
+    begin
+      @context = if context_id.present?
+                   context_class.find(params[:context_id])
+                 else
+                   context_class.find_by(uuid: params[:context_uuid])
+                 end
+    rescue ActiveRecord::RecordNotFound
+      @context = nil
+    end
+  end
+
+  def decrypted_jwt
+    @decrypted_jwt ||= CanvasSecurity::ServicesJwt.decrypt(CanvasSecurity.base64_decode(params[:jwt]), ignore_expiration: true)
+  end
+
+  def refresh_for_another_user?
+    @current_user.global_id != decrypted_jwt["sub"].to_i
+  end
+
+  def user_can_refresh?
+    @current_user.root_admin_for?(@domain_root_account) && @access_token.developer_key.internal_service?
+  end
+
+  def render_invalid_refresh
     render(
       json: { errors: { jwt: "invalid refresh" } },
       status: :bad_request

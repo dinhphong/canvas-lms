@@ -43,9 +43,7 @@ class Notification < Switchman::UnshardedRecord
   ].freeze
 
   ALLOWED_PUSH_NOTIFICATION_CATEGORIES = %w[
-    all_submissions
     announcement
-    announcement_created_by_you
     appointment_availability
     appointment_cancelations
     calendar
@@ -215,10 +213,10 @@ class Notification < Switchman::UnshardedRecord
     if TYPES_TO_PRELOAD_CONTEXT_ROLES.include?(name)
       case asset
       when Assignment
-        ActiveRecord::Associations::Preloader.new.preload(asset, :assignment_overrides)
+        ActiveRecord::Associations.preload(asset, :assignment_overrides)
         asset.context.preload_user_roles!
       when AssignmentOverride
-        ActiveRecord::Associations::Preloader.new.preload(asset.assignment, :assignment_overrides)
+        ActiveRecord::Associations.preload(asset.assignment, :assignment_overrides)
         asset.assignment.context.preload_user_roles!
       end
     end
@@ -573,10 +571,18 @@ class Notification < Switchman::UnshardedRecord
       t(:discussion_description, "New Discussion topic in your course")
     when "DiscussionEntry"
       t(:discussion_post_description, "New reply on a topic you're subscribed to")
+    # Remove the feature flag explanation when :react_discussions_post feature flag is removed
     when "DiscussionMention"
-      t("New Mention in a Discussion")
+      mt(:discussion_mention_description, <<~MD)
+        New Mention in a Discussion.
+
+        *Discussion Mentions are only available
+        for courses or accounts that have the
+        Discussions/Announcements Redesign
+        feature flag turned on.*
+      MD
     when "ReportedReply"
-      t("New reported reply in a Discussion")
+      t(:reported_reply_description, "New reported reply in a Discussion")
     when "Due Date"
       t(:due_date_description, "Assignment due date change")
     when "Grading"

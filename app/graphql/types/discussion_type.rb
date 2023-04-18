@@ -18,22 +18,22 @@
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 #
 
-class DiscussionFilterType < Types::BaseEnum
-  graphql_name "DiscussionFilterType"
-  description "Search types that can be associated with discussions"
-  value "all"
-  value "unread"
-  value "drafts"
-  value "deleted"
-end
-
-class DiscussionSortOrderType < Types::BaseEnum
-  graphql_name "DiscussionSortOrderType"
-  value "asc", value: :asc
-  value "desc", value: :desc
-end
-
 module Types
+  class DiscussionFilterType < Types::BaseEnum
+    graphql_name "DiscussionFilterType"
+    description "Search types that can be associated with discussions"
+    value "all"
+    value "unread"
+    value "drafts"
+    value "deleted"
+  end
+
+  class DiscussionSortOrderType < Types::BaseEnum
+    graphql_name "DiscussionSortOrderType"
+    value "asc", value: :asc
+    value "desc", value: :desc
+  end
+
   class DiscussionType < ApplicationObjectType
     graphql_name "Discussion"
 
@@ -110,9 +110,10 @@ module Types
 
     field :discussion_entries_connection, Types::DiscussionEntryType.connection_type, null: true do
       argument :search_term, String, required: false
-      argument :filter, DiscussionFilterType, required: false
-      argument :sort_order, DiscussionSortOrderType, required: false
+      argument :filter, Types::DiscussionFilterType, required: false
+      argument :sort_order, Types::DiscussionSortOrderType, required: false
       argument :root_entries, Boolean, required: false
+      argument :user_search_id, String, required: false
     end
     def discussion_entries_connection(**args)
       get_entries(args)
@@ -155,11 +156,11 @@ module Types
     end
 
     field :author, Types::UserType, null: true do
-      argument :course_id, ID, required: false, prepare: GraphQLHelpers.relay_or_legacy_id_prepare_func("Course")
+      argument :course_id, String, required: false
       argument :role_types, [String], "Return only requested base role types", required: false
       argument :built_in_only, Boolean, "Only return default/built_in roles", required: false
     end
-    def author(course_id: nil, role_types: nil, built_in_only: true)
+    def author(course_id: nil, role_types: nil, built_in_only: false)
       if object.anonymous? && !course_id
         nil
       else
@@ -181,11 +182,15 @@ module Types
     def anonymous_author
       if object.anonymous_state == "full_anonymity" || (object.anonymous_state == "partial_anonymity" && object.is_anonymous_author)
         Loaders::DiscussionTopicParticipantLoader.for(object.id).load(object.user_id).then do |participant|
-          {
-            id: participant.id.to_s(36),
-            short_name: object.user_id == current_user.id ? "current_user" : participant.id.to_s(36),
-            avatar_url: nil
-          }
+          if participant.nil?
+            nil
+          else
+            {
+              id: participant.id.to_s(36),
+              short_name: object.user_id == current_user.id ? "current_user" : participant.id.to_s(36),
+              avatar_url: nil
+            }
+          end
         end
       else
         nil
@@ -193,11 +198,11 @@ module Types
     end
 
     field :editor, Types::UserType, null: true do
-      argument :course_id, ID, required: false, prepare: GraphQLHelpers.relay_or_legacy_id_prepare_func("Course")
+      argument :course_id, String, required: false
       argument :role_types, [String], "Return only requested base role types", required: false
       argument :built_in_only, Boolean, "Only return default/built_in roles", required: false
     end
-    def editor(course_id: nil, role_types: nil, built_in_only: true)
+    def editor(course_id: nil, role_types: nil, built_in_only: false)
       if object.anonymous? && !course_id
         nil
       else
@@ -227,7 +232,28 @@ module Types
 
     field :course_sections, [Types::SectionType], null: false
     def course_sections
-      load_association(:course_sections)
+      course = nil
+      if object.context.is_a?(Course)
+        course = object.context
+      end
+
+      if object.context.is_a?(Group) && object.context.context.is_a?(Course)
+        course = object.context.context
+      end
+
+      load_association(:course_sections).then do |course_sections|
+        if course.nil?
+          course_sections
+        else
+          Loaders::CourseRoleLoader.for(course_id: course.id, role_types: nil, built_in_only: nil).load(current_user).then do |roles|
+            if roles&.include?("TeacherEnrollment") || roles&.include?("TaEnrollment") || roles&.include?("DesignerEnrollment")
+              course_sections
+            else
+              course_sections.joins(:student_enrollments).where(enrollments: { user_id: current_user.id })
+            end
+          end
+        end
+      end
     end
 
     field :can_unpublish, Boolean, null: false
@@ -247,8 +273,8 @@ module Types
     field :entries_total_pages, Integer, null: true do
       argument :per_page, Integer, required: true
       argument :search_term, String, required: false
-      argument :filter, DiscussionFilterType, required: false
-      argument :sort_order, DiscussionSortOrderType, required: false
+      argument :filter, Types::DiscussionFilterType, required: false
+      argument :sort_order, Types::DiscussionSortOrderType, required: false
       argument :root_entries, Boolean, required: false
     end
     def entries_total_pages(**args)
@@ -258,8 +284,8 @@ module Types
     field :root_entries_total_pages, Integer, null: true do
       argument :per_page, Integer, required: true
       argument :search_term, String, required: false
-      argument :filter, DiscussionFilterType, required: false
-      argument :sort_order, DiscussionSortOrderType, required: false
+      argument :filter, Types::DiscussionFilterType, required: false
+      argument :sort_order, Types::DiscussionSortOrderType, required: false
     end
     def root_entries_total_pages(**args)
       args[:root_entries] = true
@@ -275,7 +301,7 @@ module Types
 
     field :search_entry_count, Integer, null: true do
       argument :search_term, String, required: false
-      argument :filter, DiscussionFilterType, required: false
+      argument :filter, Types::DiscussionFilterType, required: false
     end
     def search_entry_count(**args)
       get_entries(args).then(&:count)
@@ -293,7 +319,7 @@ module Types
       ).load(object)
     end
 
-    def get_entries(search_term: nil, filter: nil, sort_order: :asc, root_entries: false)
+    def get_entries(search_term: nil, filter: nil, sort_order: :asc, root_entries: false, user_search_id: nil)
       return [] if object.initial_post_required?(current_user, session) || !available_for_user
 
       Loaders::DiscussionEntryLoader.for(
@@ -301,7 +327,8 @@ module Types
         search_term: search_term,
         filter: filter,
         sort_order: sort_order,
-        root_entries: root_entries
+        root_entries: root_entries,
+        user_search_id: user_search_id
       ).load(object)
     end
   end

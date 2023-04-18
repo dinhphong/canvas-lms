@@ -23,7 +23,7 @@ require "aws-sdk-sns"
 class DeveloperKey < ActiveRecord::Base
   class CacheOnAssociation < ActiveRecord::Associations::BelongsToAssociation
     def find_target
-      DeveloperKey.find_cached(owner._read_attribute(reflection.foreign_key))
+      DeveloperKey.find_cached(owner.attribute(reflection.foreign_key))
     end
   end
 
@@ -242,7 +242,8 @@ class DeveloperKey < ActiveRecord::Base
     return true if account_id.blank?
     return true if target_account.id == account_id
 
-    target_account.account_chain_ids.include?(account_id)
+    # Include the federated parent unless we are the federated parent
+    target_account.account_chain_ids(include_federated_parent_id: !target_account.primary_settings_root_account?).include?(account_id)
   end
 
   def account_name
@@ -256,6 +257,7 @@ class DeveloperKey < ActiveRecord::Base
   # verify that the given uri has the same domain as this key's
   # redirect_uri domain.
   def redirect_domain_matches?(redirect_uri)
+    return false if redirect_uri.blank?
     return true if redirect_uris.include?(redirect_uri)
 
     # legacy deprecated
@@ -282,15 +284,13 @@ class DeveloperKey < ActiveRecord::Base
     binding = DeveloperKeyAccountBinding.find_site_admin_cached(self)
     return binding if binding.present?
 
-    # Search for bindings in the account chain starting with the highest account
-    accounts = Account.account_chain_ids(binding_account).reverse
-    binding = DeveloperKeyAccountBinding.find_in_account_priority(accounts, id)
+    # Search for bindings in the account chain starting with the highest account,
+    # and include consortium parent if necessary
+    accounts = binding_account.account_chain(include_federated_parent: !binding_account.primary_settings_root_account?).reverse
+    binding = DeveloperKeyAccountBinding.find_in_account_priority(accounts, self)
 
     # If no explicity set bindings were found check for 'allow' bindings
-    binding ||= DeveloperKeyAccountBinding.find_in_account_priority(accounts.reverse, id, false)
-
-    # Check binding not for wrong account (on different shard)
-    return nil if binding && binding.shard.id != binding_account.shard.id
+    binding ||= DeveloperKeyAccountBinding.find_in_account_priority(accounts.reverse, self, explicitly_set: false)
 
     binding
   end
@@ -360,6 +360,19 @@ class DeveloperKey < ActiveRecord::Base
     sessions_settings[:mobile_timeout]&.to_f&.minutes
   end
 
+  # In an OAuth context, setting this field to true means that access tokens
+  # from this key will not be displayed on the user profile page.
+  #
+  # In an LTI context, setting this field to true means that any tools associated
+  # with this key are considered "internal" tools (like Quizzes, etc) and are
+  # eligible for internal-only features. These features are opt-in only and not
+  # required, and internally-developed tools are not required to set this field
+  # to true if they don't need any of the features. These tools may be LTI 1.1
+  # or LTI 1.3 tools.
+  def internal_service?
+    internal_service
+  end
+
   private
 
   def validate_lti_fields
@@ -382,18 +395,42 @@ class DeveloperKey < ActiveRecord::Base
   def manage_external_tools(enqueue_args, method, affected_account)
     return if tool_configuration.blank?
 
+    start_time = Time.zone.now.to_i
     if affected_account.blank? || affected_account.site_admin?
       # Cleanup tools across all shards
       delay(**enqueue_args)
-        .manage_external_tools_multi_shard(enqueue_args, method, affected_account)
+        .manage_external_tools_multi_shard(enqueue_args, method, affected_account, start_time)
     else
-      delay(**enqueue_args).__send__(method, affected_account)
+      delay(**enqueue_args).manage_external_tools_on_shard(method, affected_account, start_time)
     end
   end
 
-  def manage_external_tools_multi_shard(enqueue_args, method, affected_account)
+  def manage_external_tools_multi_shard(enqueue_args, method, affected_account, start_time)
     Shard.with_each_shard do
-      delay(**enqueue_args).__send__(method, affected_account)
+      delay(**enqueue_args).manage_external_tools_on_shard(method, affected_account, start_time)
+    end
+  end
+
+  def manage_external_tools_on_shard(method, account, start_time)
+    __send__(method, account)
+    instrument_tool_management(method, start_time)
+  rescue => e
+    instrument_tool_management(method, start_time, e)
+    raise e
+  end
+
+  def instrument_tool_management(method, start_time, exception = nil)
+    stat_prefix = "developer_key.manage_external_tools"
+    stat_prefix += ".error" if exception
+
+    tags = { method: method }
+    latency = (Time.zone.now.to_i - start_time) * 1000 # ms for DD
+
+    InstStatsd::Statsd.increment("#{stat_prefix}.count", tags: tags)
+    InstStatsd::Statsd.timing("#{stat_prefix}.latency", latency, tags: tags)
+
+    if exception
+      Canvas::Errors.capture_exception(:developer_keys, exception, :error)
     end
   end
 

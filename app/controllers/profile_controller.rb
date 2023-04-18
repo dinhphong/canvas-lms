@@ -242,8 +242,6 @@ class ProfileController < ApplicationController
     add_crumb(@current_user.short_name, profile_path)
     add_crumb(t("Notification Settings"))
     js_env NOTIFICATION_PREFERENCES_OPTIONS: {
-      enable_course_selector:
-        Account.site_admin.feature_enabled?(:notification_settings_course_selector) || @user&.active_k5_enrollments?,
       allowed_push_categories: Notification.categories_to_send_in_push,
       send_scores_in_emails_text: Notification.where(category: "Grading").first&.related_user_setting(@user, @domain_root_account),
       daily_notification_time: time_string(@current_user.daily_notification_time, nil, @current_user.time_zone || ActiveSupport::TimeZone["America/Denver"] || Time.zone),
@@ -255,6 +253,7 @@ class ProfileController < ApplicationController
       read_privacy_info: @user.preferences[:read_notification_privacy_info],
       account_privacy_notice: @domain_root_account.settings[:external_notification_warning]
     }
+
     js_bundle :account_notification_settings
     render html: "", layout: true
   end
@@ -486,7 +485,6 @@ class ProfileController < ApplicationController
     add_crumb(@user.short_name, profile_path)
     add_crumb(t("crumbs.observees", "Observing"))
 
-    @google_analytics_page_title = "Students Being Observed"
     join_title(t(:page_title, "Students Being Observed"), @user.name)
     js_bundle :user_observees
 

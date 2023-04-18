@@ -20,6 +20,7 @@
 
 class CanvadocSessionsController < ApplicationController
   include CanvadocsHelper
+  include CoursesHelper
   include HmacHelper
 
   def create
@@ -81,7 +82,7 @@ class CanvadocSessionsController < ApplicationController
       opts = {
         preferred_plugins: [Canvadocs::RENDER_PDFJS, Canvadocs::RENDER_BOX, Canvadocs::RENDER_CROCODOC],
         enable_annotations: blob["enable_annotations"],
-        use_cloudfront: Account.site_admin.feature_enabled?(:use_cloudfront_for_docviewer)
+        use_cloudfront: true
       }
 
       submission_id = blob["submission_id"]
@@ -100,13 +101,15 @@ class CanvadocSessionsController < ApplicationController
       end
 
       if opts[:enable_annotations]
+        assignment = submission.assignment
         # Docviewer only cares about the enrollment type when we're doing annotations
-        opts[:enrollment_type] = blob["enrollment_type"]
         opts[:disable_annotation_notifications] = blob["disable_annotation_notifications"] || false
+        # We need to have another mechanism in which we can set enrollment type in the case
+        # that it's not provided in the params from a valid context i.e. ePortfolios
+        opts[:enrollment_type] = blob["enrollment_type"] || user_type(assignment.context, @current_user)
         # If we STILL don't have a role, something went way wrong so let's be unauthorized.
         return render(plain: "unauthorized", status: :unauthorized) if opts[:enrollment_type].blank?
 
-        assignment = submission.assignment
         # If we're doing annotations, DocViewer needs additional information to send notifications
         opts[:canvas_base_url] = assignment.course.root_account.domain
         opts[:user_id] = @current_user.id
@@ -152,7 +155,7 @@ class CanvadocSessionsController < ApplicationController
   rescue HmacHelper::Error => e
     Canvas::Errors.capture_exception(:canvadocs, e, :info)
     render plain: "unauthorized", status: :unauthorized
-  rescue Timeout::Error, Canvadocs::BadGateway, Canvadocs::ServerError => e
+  rescue Timeout::Error, Canvadocs::BadGateway, Canvadocs::ServerError, Canvadocs::HeavyLoadError => e
     Canvas::Errors.capture_exception(:canvadocs, e, :warn)
     render plain: "Service is currently unavailable. Try again later.",
            status: :service_unavailable

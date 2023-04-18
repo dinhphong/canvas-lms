@@ -175,11 +175,13 @@ module Importers
         Importers::WikiPageImporter.process_migration_course_outline(data, migration)
         Importers::CalendarEventImporter.process_migration(data, migration)
         Importers::LtiResourceLinkImporter.process_migration(data, migration)
-        Importers::PacePlanImporter.process_migration(data, migration)
+
+        # FIXME: Eventually remove feature flag checking
+        Importers::CoursePaceImporter.process_migration(data, migration) if course.account.feature_enabled?(:course_paces)
 
         everything_selected = !migration.copy_options || migration.is_set?(migration.copy_options[:everything])
 
-        if everything_selected || migration.is_set?(migration.copy_options[:all_course_settings])
+        if (everything_selected || migration.is_set?(migration.copy_options[:all_course_settings])) && !(migration.should_skip_import? "all_course_settings")
           import_settings_from_migration(course, data, migration)
           Importers::LatePolicyImporter.process_migration(data, migration) unless migration.should_skip_import? "LatePolicy"
         end
@@ -382,6 +384,7 @@ module Importers
         migration.imported_migration_items_by_class(WikiPage).each do |event|
           event.reload
           event.todo_date = shift_date(event.todo_date, shift_options)
+          event.publish_at = shift_date(event.publish_at, shift_options)
           event.save_without_broadcasting
         end
 
@@ -529,6 +532,10 @@ module Importers
 
       if settings.key?(:allow_final_grade_override) && course.account.feature_enabled?(:final_grades_override)
         course.allow_final_grade_override = settings[:allow_final_grade_override]
+      end
+
+      if settings.key?(:enable_course_paces) && course.account.feature_enabled?(:course_paces)
+        course.enable_course_paces = settings[:enable_course_paces]
       end
     end
 

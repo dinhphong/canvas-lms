@@ -29,7 +29,7 @@ module StreamItemsHelper
     attr_accessor :id, :type, :name, :linked_to, :time_zone
   end
 
-  def categorize_stream_items(stream_items, user = @current_user)
+  def categorize_stream_items(stream_items, user = @user || @current_user)
     categorized_items = {}
     return categorized_items unless stream_items.present? # if we have no items (possibly because we have no user), don't try to activate the user's shard
 
@@ -37,11 +37,11 @@ module StreamItemsHelper
     supported_categories.each { |category| categorized_items[category] = [] }
 
     topic_types = %w[DiscussionTopic Announcement]
-    ActiveRecord::Associations::Preloader.new.preload(
+    ActiveRecord::Associations.preload(
       stream_items.select { |i| topic_types.include?(i.asset_type) }.map(&:data), :context
     )
 
-    ActiveRecord::Associations::Preloader.new.preload(
+    ActiveRecord::Associations.preload(
       stream_items.select { |i| i.asset_type == "DiscussionEntry" }.map(&:data), discussion_topic: :context
     )
     topic_types << "DiscussionEntry"

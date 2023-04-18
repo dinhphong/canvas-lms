@@ -45,8 +45,10 @@ class CommunicationChannel < ActiveRecord::Base
   validate :uniqueness_of_path
   validate :validate_email, if: ->(cc) { cc.path_type == TYPE_EMAIL && cc.new_record? }
   validate :not_otp_communication_channel, if: ->(cc) { cc.path_type == TYPE_SMS && cc.retired? && !cc.new_record? }
+  after_destroy :after_destroy_flag_old_microsoft_sync_user_mappings
   after_commit :check_if_bouncing_changed
   after_save :clear_user_email_cache, if: -> { workflow_state_before_last_save != workflow_state }
+  after_save :after_save_flag_old_microsoft_sync_user_mappings
 
   acts_as_list scope: :user
 
@@ -56,15 +58,26 @@ class CommunicationChannel < ActiveRecord::Base
   attr_reader :send_confirmation
 
   # Constants for the different supported communication channels
-  TYPE_EMAIL    = "email"
-  TYPE_PUSH     = "push"
-  TYPE_SMS      = "sms"
-  TYPE_SLACK    = "slack"
-  TYPE_TWITTER  = "twitter"
+  TYPE_EMAIL          = "email"
+  TYPE_PUSH           = "push"
+  TYPE_SMS            = "sms"
+  TYPE_SLACK          = "slack"
+  TYPE_TWITTER        = "twitter"
+  TYPE_PERSONAL_EMAIL = "personal_email"
 
-  VALID_TYPES = [TYPE_EMAIL, TYPE_SMS, TYPE_TWITTER, TYPE_PUSH, TYPE_SLACK].freeze
+  VALID_TYPES = [TYPE_EMAIL, TYPE_SMS, TYPE_TWITTER, TYPE_PUSH, TYPE_SLACK, TYPE_PERSONAL_EMAIL].freeze
 
   RETIRE_THRESHOLD = 1
+
+  # Generally, "TYPE_PERSONAL_EMAIL" should be treated exactly the same
+  # as TYPE_EMAIL.  It is just kept distinct for the purposes of customers
+  # querying records in Canvas Data.
+  def path_type
+    raw_value = read_attribute(:path_type)
+    return TYPE_EMAIL if raw_value == TYPE_PERSONAL_EMAIL
+
+    raw_value
+  end
 
   def under_user_cc_limit
     max_ccs = Setting.get("max_ccs_per_user", "100").to_i
@@ -383,7 +396,7 @@ class CommunicationChannel < ActiveRecord::Base
   scope :by_path, ->(path) { where(by_path_condition(arel_table[:path]).eq(by_path_condition(path))) }
   scope :path_like, ->(path) { where(by_path_condition(arel_table[:path]).matches(by_path_condition(path))) }
 
-  scope :email, -> { where(path_type: TYPE_EMAIL) }
+  scope :email, -> { where(path_type: [TYPE_EMAIL, TYPE_PERSONAL_EMAIL]) }
   scope :sms, -> { where(path_type: TYPE_SMS) }
 
   scope :active, -> { where(workflow_state: "active") }
@@ -612,6 +625,24 @@ class CommunicationChannel < ActiveRecord::Base
     return nil unless (carrier = CommunicationChannel.sms_carriers[match[:domain]])
 
     "+#{carrier["country_code"]}#{match[:number]}"
+  end
+
+  def after_save_flag_old_microsoft_sync_user_mappings
+    # We might be able to refine this check to ignore irrelevant changes to
+    # non-primary email addresses but the conditions are complicated (for
+    # instance, if the comm chammenl with the lowest priority number is not in
+    # an "active" state, changes to other comm channels may be relevant), so
+    # it's safer just to do this.
+    if %i[path path_type position workflow_state].any? { |attr| saved_change_to_attribute(attr) } &&
+       (path_type == TYPE_EMAIL || path_type_before_last_save == TYPE_EMAIL)
+      MicrosoftSync::UserMapping.delay_if_production.flag_as_needs_updating_if_using_email(user)
+    end
+  end
+
+  def after_destroy_flag_old_microsoft_sync_user_mappings
+    if path_type == TYPE_EMAIL
+      MicrosoftSync::UserMapping.delay_if_production.flag_as_needs_updating_if_using_email(user)
+    end
   end
 
   class << self

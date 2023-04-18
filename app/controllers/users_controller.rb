@@ -71,6 +71,11 @@ require "atom"
 #           "description": "A URL to retrieve a generic avatar.",
 #           "example": "https://en.gravatar.com/avatar/d8cb8c8cd40ddf0cd05241443a591868?s=80&r=g",
 #           "type": "string"
+#         },
+#         "display_name": {
+#           "description": "The anonymized display name for the student.",
+#           "example": "Student 2",
+#           "type": "string"
 #         }
 #       }
 #     }
@@ -138,6 +143,11 @@ require "atom"
 #           "example": "https://en.gravatar.com/avatar/d8cb8c8cd40ddf0cd05241443a591868?s=80&r=g",
 #           "type": "string"
 #         },
+#         "avatar_state": {
+#           "description": "Optional: If avatars are enabled and caller is admin, this field can be requested and will contain the current state of the user's avatar.",
+#           "example": "approved",
+#           "type": "string"
+#         },
 #         "enrollments": {
 #           "description": "Optional: This field can be requested with certain API calls, and will return a list of the users active enrollments. See the List enrollments API for more details about the format of these records.",
 #           "type": "array",
@@ -189,7 +199,8 @@ class UsersController < ApplicationController
                                         user_dashboard toggle_hide_dashcard_color_overlays
                                         masquerade external_tool dashboard_sidebar settings activity_stream
                                         activity_stream_summary pandata_events_token dashboard_cards
-                                        user_graded_submissions show terminate_sessions]
+                                        user_graded_submissions show terminate_sessions dashboard_stream_items
+                                        show_k5_dashboard]
   before_action :require_registered_user, only: [:delete_user_service,
                                                  :create_user_service]
   before_action :reject_student_view_student, only: %i[delete_user_service
@@ -225,7 +236,7 @@ class UsersController < ApplicationController
       @grades = grades_for_presenter(@presenter, @grading_periods)
       js_env grades_for_student_url: grades_for_student_url
 
-      ActiveRecord::Associations::Preloader.new.preload(@observed_enrollments, :course)
+      ActiveRecord::Associations.preload(@observed_enrollments, :course)
 
       @page_title = t(:page_title, "Grades")
       js_bundle :user_grades
@@ -404,6 +415,9 @@ class UsersController < ApplicationController
     get_context
     return unless authorized_action(@context, @current_user, :read_roster)
 
+    includes = (params[:include] || []) & %w[avatar_url email last_login time_zone uuid ui_invoked]
+    includes << "last_login" if params[:sort] == "last_login" && !includes.include?("last_login")
+
     search_term = params[:search_term].presence
     if search_term
       users = UserSearch.for_user_in_context(search_term, @context, @current_user, session,
@@ -413,15 +427,22 @@ class UsersController < ApplicationController
                                              })
     else
       users = UserSearch.scope_for(@context, @current_user,
-                                   { order: params[:order], sort: params[:sort], enrollment_role_id: params[:role_filter_id],
-                                     enrollment_type: params[:enrollment_type] })
+                                   {
+                                     order: params[:order], sort: params[:sort], enrollment_role_id: params[:role_filter_id],
+                                     enrollment_type: params[:enrollment_type], ui_invoked: includes.include?("ui_invoked")
+                                   })
       users = users.with_last_login if params[:sort] == "last_login"
     end
 
-    includes = (params[:include] || []) & %w[avatar_url email last_login time_zone uuid]
-    includes << "last_login" if params[:sort] == "last_login" && !includes.include?("last_login")
+    page_opts = { total_entries: nil }
+    if includes.include?("ui_invoked") && Setting.get("ui_invoked_count_pages", "true") == "true"
+      page_opts = {} # let Folio calculate total entries
+      includes.delete("ui_invoked")
+    end
+
     GuardRail.activate(:secondary) do
-      users = Api.paginate(users, self, api_v1_account_users_url, { total_entries: nil })
+      users = Api.paginate(users, self, api_v1_account_users_url, page_opts)
+
       user_json_preloads(users, includes.include?("email"))
       User.preload_last_login(users, @context.resolved_root_account_id) if includes.include?("last_login") && params[:sort] != "last_login"
       render json: users.map { |u| user_json(u, @current_user, session, includes) }
@@ -453,7 +474,6 @@ class UsersController < ApplicationController
       css_bundle :act_as_modal
 
       @page_title = t("Act as %{user_name}", user_name: @user.short_name)
-      @google_analytics_page_title = t("Act as user")
       js_env act_as_user_data: {
         user: {
           name: @user.name,
@@ -497,8 +517,9 @@ class UsersController < ApplicationController
 
     # Reload user settings so we don't get a stale value for K5_USER when switching dashboards
     @current_user.reload
+    observed_users_list = observed_users(@current_user, session)
     k5_disabled = k5_disabled?
-    k5_user = k5_user?(false)
+    k5_user = k5_user?(check_disabled: false)
     js_env({ K5_USER: k5_user && !k5_disabled }, true)
 
     # things needed on both k5 and classic dashboards
@@ -513,12 +534,12 @@ class UsersController < ApplicationController
              STUDENT_PLANNER_ENABLED: planner_enabled?,
              STUDENT_PLANNER_COURSES: planner_enabled? && map_courses_for_menu(@current_user.courses_with_primary_enrollment),
              STUDENT_PLANNER_GROUPS: planner_enabled? && map_groups_for_planner(@current_user.current_groups),
-             CAN_ENABLE_K5_DASHBOARD: k5_disabled && k5_user,
+             ALLOW_ELEMENTARY_DASHBOARD: k5_disabled && k5_user,
              CREATE_COURSES_PERMISSIONS: {
                PERMISSION: create_permission_root_account || create_permission_mcc_account,
                RESTRICT_TO_MCC_ACCOUNT: !!(!create_permission_root_account && create_permission_mcc_account)
              },
-             OBSERVED_USERS_LIST: observed_users(@current_user, session),
+             OBSERVED_USERS_LIST: observed_users_list,
              CAN_ADD_OBSERVEE: @current_user
                                  .profile
                                  .tabs_available(@current_user, root_account: @domain_root_account)
@@ -526,8 +547,8 @@ class UsersController < ApplicationController
            })
 
     # prefetch dashboard cards with the right observer url param
-    if @current_user.roles(@domain_root_account).include?("observer") && (Account.site_admin.feature_enabled?(:k5_parent_support) || Account.site_admin.feature_enabled?(:observer_picker))
-      @cards_prefetch_observer_param = @selected_observed_user&.id
+    if @current_user.roles(@domain_root_account).include?("observer")
+      @cards_prefetch_observed_param = @selected_observed_user&.id
     end
 
     if k5_user?
@@ -564,7 +585,16 @@ class UsersController < ApplicationController
   def dashboard_stream_items
     cancel_cache_buster
 
-    @stream_items = @current_user.try(:cached_recent_stream_items) || []
+    @user = params[:observed_user_id].present? ? api_find(User, params[:observed_user_id]) : @current_user
+    @is_observing_student = @current_user != @user
+    course_ids = nil
+    if @is_observing_student
+      course_ids = @current_user.cached_course_ids_for_observed_user(@user)
+      return render_unauthorized_action unless course_ids.any?
+    end
+    courses = course_ids.present? ? api_find_all(Course, course_ids) : nil
+
+    @stream_items = @user.cached_recent_stream_items(contexts: courses)
     if stale?(etag: @stream_items)
       render partial: "shared/recent_activity", layout: false
     end
@@ -577,7 +607,7 @@ class UsersController < ApplicationController
 
   def dashboard_cards
     opts = {}
-    opts[:observee_user] = User.find_by(id: params[:observed_user].to_i) || @current_user if params.key?(:observed_user)
+    opts[:observee_user] = User.find_by(id: params[:observed_user_id].to_i) || @current_user if params.key?(:observed_user_id)
     dashboard_courses = map_courses_for_menu(@current_user.menu_courses(nil, opts), tabs: DASHBOARD_CARD_TABS)
     published, unpublished = dashboard_courses.partition { |course| course[:published] }
     Rails.cache.write(["last_known_dashboard_cards_published_count", @current_user.global_id].cache_key, published.count)
@@ -618,7 +648,7 @@ class UsersController < ApplicationController
 
   def dashboard_sidebar
     GuardRail.activate(:secondary) do
-      @user = params[:observed_user].present? && Account.site_admin.feature_enabled?(:observer_picker) ? api_find(User, params[:observed_user]) : @current_user
+      @user = params[:observed_user_id].present? ? api_find(User, params[:observed_user_id]) : @current_user
       @is_observing_student = @current_user != @user
       course_ids = nil
 
@@ -836,12 +866,16 @@ class UsersController < ApplicationController
       ]
     end[0, limit]
 
-    # Since concluded courses aren't manageable, we check the read_as_admin grant in those cases
-    # Otherwise we check manageability along with the read grant (so admins won't get cluttered w/ courses)
-    if include_concluded
-      @courses.select! { |c| c.grants_right?(@current_user, :read_as_admin) && c.grants_right?(@current_user, :read) }
+    if params[:enforce_manage_grant_requirement]
+      @courses.select! do |c|
+        c.grants_any_right?(
+          @current_user,
+          :manage_content,
+          *RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS
+        )
+      end
     else
-      @courses.select! { |c| c.grants_right?(@current_user, :manage_content) && c.grants_right?(@current_user, :read) }
+      @courses.select! { |c| c.grants_all_rights?(@current_user, :read_as_admin, :read) }
     end
 
     render json: @courses.map { |c|
@@ -1133,7 +1167,7 @@ class UsersController < ApplicationController
       includes = Array(params[:include])
       planner_overrides = includes.include?("planner_overrides")
       include_course = includes.include?("course")
-      ActiveRecord::Associations::Preloader.new.preload(assignments, :context) if include_course
+      ActiveRecord::Associations.preload(assignments, :context) if include_course
 
       json = assignments.map do |as|
         assmt_json = assignment_json(as, user, session, include_planner_override: planner_overrides)
@@ -1290,6 +1324,11 @@ class UsersController < ApplicationController
 
       @group_memberships = @user.cached_current_group_memberships_by_date
 
+      # restrict group memberships view for other users
+      if @user != @current_user
+        @group_memberships = @group_memberships.select { |m| m.grants_right?(@current_user, session, :read) }
+      end
+
       # course_section and enrollment term will only be used if the enrollment dates haven't been cached yet;
       # maybe should just look at the first enrollment and check if it's cached to decide if we should include
       # them here
@@ -1299,7 +1338,7 @@ class UsersController < ApplicationController
                           .eager_load(:course)
                           .preload(:associated_user, :course_section, :enrollment_state, course: { enrollment_term: :enrollment_dates_overrides }).to_a
 
-      # restrict view for other users
+      # restrict course enrollments view for other users
       if @user != @current_user
         @enrollments = @enrollments.select { |e| e.grants_right?(@current_user, session, :read) }
       end
@@ -1308,10 +1347,11 @@ class UsersController < ApplicationController
       # pre-populate the reverse association
       @enrollments.each { |e| e.user = @user }
 
+      @show_page_views = !!(page_views_enabled? && @user.grants_right?(@current_user, session, :view_statistics))
+
       status = @user.deleted? ? 404 : 200
       respond_to do |format|
         format.html do
-          @google_analytics_page_title = "User"
           @body_classes << "full-width"
           js_env(CONTEXT_USER_DISPLAY_NAME: @user.short_name,
                  USER_ID: @user.id)
@@ -1366,7 +1406,7 @@ class UsersController < ApplicationController
             require_sis: false,
             include_all_pseudonyms: true
           )
-        @user.last_login = pseudonyms.max_by(&:current_login_at).current_login_at
+        @user.last_login = pseudonyms&.filter_map(&:current_login_at)&.max
       end
 
       render json: user_json(@user, @current_user, session, includes, @domain_root_account),
@@ -1377,6 +1417,7 @@ class UsersController < ApplicationController
   end
 
   def external_tool
+    timing_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @tool = ContextExternalTool.find_for(params[:id], @domain_root_account, :user_navigation)
     @opaque_id = @tool.opaque_identifier_for(@current_user, context: @domain_root_account)
     @resource_type = "user_navigation"
@@ -1397,7 +1438,8 @@ class UsersController < ApplicationController
     variable_expander = Lti::VariableExpander.new(@domain_root_account, @context, self, {
                                                     current_user: @current_user,
                                                     current_pseudonym: @current_pseudonym,
-                                                    tool: @tool
+                                                    tool: @tool,
+                                                    placement: :user_navigation
                                                   })
     Canvas::LiveEvents.asset_access(@tool, "external_tools", @current_user.class.name, nil)
     adapter = if @tool.use_1_3?
@@ -1421,6 +1463,8 @@ class UsersController < ApplicationController
     set_active_tab @tool.asset_string
     add_crumb(@current_user.short_name, user_profile_path(@current_user))
     render Lti::AppUtil.display_template
+    timing_end = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    InstStatsd::Statsd.timing("lti.user_external_tool.request_time", timing_end - timing_start, tags: { lti_version: @tool.lti_version })
   end
 
   def new
@@ -1796,14 +1840,7 @@ class UsersController < ApplicationController
 
     return unless authorized_action(user, @current_user, [:manage, :manage_user_details])
 
-    # Make sure the user has rights to the actual context used.
-    context = Context.find_by_asset_string(params[:asset_string])
-
-    if context.nil?
-      raise(ActiveRecord::RecordNotFound, "Asset does not exist")
-    end
-
-    return unless authorized_action(context, @current_user, :read)
+    raise(ActiveRecord::RecordNotFound, "Asset does not exist") unless (context = Context.find_by_asset_string(params[:asset_string]))
 
     # Check if the hexcode is valid
     unless valid_hexcode?(params[:hexcode])
@@ -1820,6 +1857,8 @@ class UsersController < ApplicationController
       respond_to do |format|
         format.json do
           if user.set_preference(:custom_colors, colors)
+            enrollment_types_tags = user.participating_enrollments.pluck(:type).uniq.map { |type| "enrollment_type:#{type}" }
+            InstStatsd::Statsd.increment("user.set_custom_color", tags: enrollment_types_tags)
             render(json: { hexcode: colors[context.asset_string] })
           else
             render(json: user.errors, status: :bad_request)
@@ -1954,6 +1993,9 @@ class UsersController < ApplicationController
   #   token and instead pass the url here. Warning: For maximum compatibility,
   #   please use 128 px square images.
   #
+  # @argument user[avatar][state] [String, "none", "submitted", "approved", "locked", "reported", "re_reported"]
+  #   To set the state of user's avatar. Only valid for account administrator.
+  #
   # @argument user[title] [String]
   #   Sets a title on the user profile. (See {api:ProfileController#settings Get user profile}.)
   #   Profiles must be enabled on the root account.
@@ -1969,12 +2011,16 @@ class UsersController < ApplicationController
   #   Adding and changing pronouns must be enabled on the root account.
   #
   # @argument user[event] [String, "suspend"|"unsuspend"]
-  #   suspends or unsuspends all logins for this user that the calling user
+  #   Suspends or unsuspends all logins for this user that the calling user
   #   has permission to
+  #
+  # @argument override_sis_stickiness [boolean]
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
   #
   # @example_request
   #
-  #   curl 'https://<canvas>/api/v1/users/133.json' \
+  #   curl 'https://<canvas>/api/v1/users/133' \
   #        -X PUT \
   #        -F 'user[name]=Sheldon Cooper' \
   #        -F 'user[short_name]=Shelly' \
@@ -2030,6 +2076,10 @@ class UsersController < ApplicationController
       elsif (url = avatar.try(:[], :url))
         user_params[:avatar_image] = { url: url }
       end
+
+      if (state = avatar.try(:[], :state))
+        user_params[:avatar_image] = { state: state }
+      end
     end
 
     if managed_attributes.empty? || !user_params.except(*managed_attributes).empty?
@@ -2037,6 +2087,11 @@ class UsersController < ApplicationController
     end
 
     managed_attributes << { avatar_image: strong_anything } if managed_attributes.delete(:avatar_image)
+
+    if params[:override_sis_stickiness] && !value_to_boolean(params[:override_sis_stickiness])
+      managed_attributes -= [*@user.stuck_sis_fields]
+    end
+
     user_params = user_params.permit(*managed_attributes)
     new_email = user_params.delete(:email)
     # admins can update avatar images even if they are locked
@@ -2045,6 +2100,7 @@ class UsersController < ApplicationController
                           @user.grants_right?(@current_user, :manage_user_details)
 
     includes = %w[locale avatar_url email time_zone]
+    includes << "avatar_state" if @user.grants_right?(@current_user, :manage_user_details)
     if (title = user_params.delete(:title))
       @user.profile.title = title
       includes << "title"
@@ -2086,7 +2142,10 @@ class UsersController < ApplicationController
 
     respond_to do |format|
       if @user.update(user_params)
-        @user.avatar_state = (old_avatar_state == :locked ? old_avatar_state : "approved") if admin_avatar_update
+        if admin_avatar_update
+          avatar_state = old_avatar_state == :locked ? old_avatar_state : "approved"
+          @user.avatar_state = user_params[:avatar_image][:state] || avatar_state
+        end
         @user.profile.save if @user.profile.changed?
         @user.save if admin_avatar_update || update_email
         # User.email= causes a reload to the user object. The saves need to
@@ -2721,6 +2780,13 @@ class UsersController < ApplicationController
     end
   end
 
+  def show_k5_dashboard
+    # reload @current_user to make sure we get a current value for their :elementary_dashboard_disabled preference
+    @current_user.reload
+    observed_users(@current_user, session) if @current_user.roles(@domain_root_account).include?("observer")
+    render json: { show_k5_dashboard: k5_user? }
+  end
+
   protected
 
   def teacher_activity_report(teacher, course, student_enrollments)
@@ -2883,8 +2949,10 @@ class UsersController < ApplicationController
   end
 
   def api_show_includes
+    allowed_includes = ["uuid", "last_login"]
+    allowed_includes << "avatar_state" if @user.grants_right?(@current_user, :manage_user_details)
     includes = %w[locale avatar_url permissions email effective_locale]
-    includes += Array.wrap(params[:include]) & ["uuid", "last_login"]
+    includes += Array.wrap(params[:include]) & allowed_includes
     includes
   end
 

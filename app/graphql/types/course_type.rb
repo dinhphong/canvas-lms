@@ -60,6 +60,17 @@ module Types
       value "inactive"
     end
 
+    class CourseFilterableEnrollmentType < BaseEnum
+      graphql_name "CourseFilterableEnrollmentType"
+      description "Users in a course can be returned based on these enrollment types"
+      value "StudentEnrollment"
+      value "TeacherEnrollment"
+      value "TaEnrollment"
+      value "ObserverEnrollment"
+      value "DesignerEnrollment"
+      value "StudentViewEnrollment"
+    end
+
     class CourseUsersFilterInputType < Types::BaseInputObject
       graphql_name "CourseUsersFilter"
 
@@ -74,6 +85,9 @@ module Types
                  to `invited`, `creation_pending`, `active`
                MD
                required: false
+      argument :enrollment_types, [CourseFilterableEnrollmentType],
+               "Only return users with the specified enrollment types",
+               required: false
     end
 
     implements GraphQL::Types::Relay::Node
@@ -85,6 +99,7 @@ module Types
 
     field :name, String, null: false
     field :course_code, String, "course short name", null: true
+    field :syllabus_body, String, null: true
     field :state, CourseWorkflowState, method: :workflow_state, null: false
 
     field :assignment_groups_connection, AssignmentGroupType.connection_type,
@@ -122,6 +137,11 @@ module Types
       course.resolved_outcome_calculation_method
     end
 
+    field :outcome_alignment_stats, CourseOutcomeAlignmentStatsType, null: true
+    def outcome_alignment_stats
+      Loaders::CourseOutcomeAlignmentStatsLoader.load(course) if course&.grants_right?(current_user, session, :manage_outcomes)
+    end
+
     field :sections_connection, SectionType.connection_type, null: true
     def sections_connection
       course.active_course_sections
@@ -151,9 +171,11 @@ module Types
         :read_roster, :view_all_grades, :manage_grades
       )
 
+      context.scoped_merge!(course: course)
       scope = UserSearch.scope_for(course, current_user,
                                    include_inactive_enrollments: true,
-                                   enrollment_state: filter[:enrollment_states])
+                                   enrollment_state: filter[:enrollment_states],
+                                   enrollment_type: filter[:enrollment_types])
 
       user_ids = filter[:user_ids] || user_ids
       if user_ids.present?
@@ -172,6 +194,7 @@ module Types
         :read_roster, :view_all_grades, :manage_grades
       )
 
+      context.scoped_merge!(course: course)
       scope = course.apply_enrollment_visibility(course.all_enrollments, current_user).active
       scope = scope.where(associated_user_id: filter[:associated_user_ids]) if filter[:associated_user_ids].present?
       scope = scope.where(type: filter[:types]) if filter[:types].present?
@@ -257,7 +280,7 @@ module Types
       argument :filter, ExternalToolFilterInputType, required: false, default_value: {}
     end
     def external_tools_connection(filter:)
-      scope = ContextExternalTool.all_tools_for(course, { placements: filter.placement })
+      scope = Lti::ContextToolFinder.all_tools_for(course, { placements: filter.placement })
       filter.state.nil? ? scope : scope.where(workflow_state: filter.state)
     end
 
@@ -317,6 +340,11 @@ module Types
       return nil unless course.grants_any_right?(current_user, :read_sis, :manage_sis)
 
       course.sis_course_id
+    end
+
+    field :allow_final_grade_override, Boolean, null: true
+    def allow_final_grade_override
+      course.allow_final_grade_override?
     end
 
     field :root_outcome_group, LearningOutcomeGroupType, null: false

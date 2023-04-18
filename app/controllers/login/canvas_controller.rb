@@ -29,6 +29,7 @@ class Login::CanvasController < ApplicationController
   protect_from_forgery except: :create, with: :exception
 
   def new
+    @allow_robot_indexing = true
     @pseudonym_session = PseudonymSession.new
     @headers = false
     flash.now[:error] = params[:message] if params[:message]
@@ -64,7 +65,7 @@ class Login::CanvasController < ApplicationController
     params[:pseudonym_session][:unique_id].try(:strip!)
 
     # Try to use authlogic's built-in login approach first
-    found = @domain_root_account.pseudonyms.scoping do
+    found = PseudonymSession.with_scope(find_options: @domain_root_account.pseudonyms) do
       @pseudonym_session = PseudonymSession.new(params[:pseudonym_session].permit(:unique_id, :password, :remember_me).to_h)
       @pseudonym_session.remote_ip = request.remote_ip
       @pseudonym_session.save

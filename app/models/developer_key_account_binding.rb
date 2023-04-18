@@ -32,24 +32,12 @@ class DeveloperKeyAccountBinding < ApplicationRecord
 
   validates :account, :developer_key, presence: true
 
+  before_save :set_root_account
   after_update :clear_cache_if_site_admin
   after_update :update_tools!
-  before_save :set_root_account
 
-  scope :active_in_account, lambda { |account|
-    where(account_id: account.account_chain_ids, workflow_state: "on")
-  }
-
-  # run this once on the local shard and again on site_admin to get all avaiable dev_keys with
-  # tool configurations
-  scope :lti_1_3_tools, lambda { |bindings|
-    bindings.joins(developer_key: :tool_configuration)
-            .where(developer_keys: { visible: true, workflow_state: "active" })
-            .eager_load(developer_key: :tool_configuration)
-  }
-
-  # Find a DeveloperKeyAccountBinding in order of account_ids. The search for a binding will
-  # be prioritized by the order of account_ids. If a binding is found for the first account
+  # Find a DeveloperKeyAccountBinding in order of accounts. The search for a binding will
+  # be prioritized by the order of accounts. If a binding is found for the first account
   # that binding will be returned, otherwise the next account will be searched and so on.
   #
   # By default only bindings with a workflow set to “on” or “off” are considered. To include
@@ -65,16 +53,25 @@ class DeveloperKeyAccountBinding < ApplicationRecord
   #
   # find_in_account_priority([1, 2, 3, 4], developer_key.id, false) would return the binding for
   # account 2.
-  def self.find_in_account_priority(account_ids, developer_key_id, explicitly_set = true)
-    raise "Account ids must be integers" if account_ids.any? { |id| !id.is_a?(Integer) }
+  #
+  # With a cross-shard account at some point in the account chain, bindings are searched for across
+  # each shard of each account.
+  def self.find_in_account_priority(accounts, developer_key, explicitly_set: true)
+    bindings = Shard.partition_by_shard(accounts) do |accounts_by_shard|
+      account_ids_string = "{#{accounts_by_shard.map(&:id).join(",")}}"
+      relation = DeveloperKeyAccountBinding
+                 .joins(sanitize_sql("JOIN unnest('#{account_ids_string}'::int8[]) WITH ordinality AS i (id, ord) ON i.id=account_id"))
+                 .where(developer_key: developer_key)
+                 .order(:ord)
+      relation = relation.where.not(workflow_state: "allow") if explicitly_set
+      relation.take
+    end
 
-    account_ids_string = "{#{account_ids.join(",")}}"
-    relation = DeveloperKeyAccountBinding
-               .joins("JOIN unnest('#{account_ids_string}'::int8[]) WITH ordinality AS i (id, ord) ON i.id=account_id")
-               .where(developer_key_id: developer_key_id)
-               .order(:ord)
-    relation = relation.where.not(workflow_state: "allow") if explicitly_set
-    relation.take
+    # Still need to order by priority -- if, given accounts [1,2,3], accounts 1
+    # and 3 were on shard A and account 2 was on shard B, and accounts 2 and 3
+    # had bindings, bindings.first would be for account 3
+    accounts_to_index = accounts.map(&:global_id).each_with_index.to_a.to_h
+    bindings.compact.min_by { |b| accounts_to_index[b.global_account_id] }
   end
 
   def self.find_site_admin_cached(developer_key)

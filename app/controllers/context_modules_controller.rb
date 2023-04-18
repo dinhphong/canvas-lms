@@ -66,7 +66,10 @@ class ContextModulesController < ApplicationController
       @section_visibility = @context.course_section_visibility(@current_user)
       @combined_active_quizzes = combined_active_quizzes
 
-      @can_edit = can_do(@context, @current_user, :manage_content)
+      @can_view = @context.grants_any_right?(@current_user, session, :manage_content, *RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS)
+      @can_add = @context.grants_any_right?(@current_user, session, :manage_content, :manage_course_content_add)
+      @can_edit = @context.grants_any_right?(@current_user, session, :manage_content, :manage_course_content_edit)
+      @can_delete = @context.grants_any_right?(@current_user, session, :manage_content, :manage_course_content_delete)
       @can_view_grades = can_do(@context, @current_user, :view_all_grades)
       @is_student = @context.grants_right?(@current_user, session, :participate_as_student)
       @can_view_unpublished = @context.grants_right?(@current_user, session, :read_as_admin)
@@ -79,24 +82,39 @@ class ContextModulesController < ApplicationController
         @last_web_export = @context.web_zip_exports.visible_to(@current_user).order("epub_exports.created_at").last
       end
 
-      @menu_tools = {}
-      placements = %i[assignment_menu discussion_topic_menu file_menu module_menu quiz_menu wiki_page_menu]
+      placements = %i[
+        assignment_menu
+        discussion_topic_menu
+        file_menu
+        module_menu
+        quiz_menu
+        wiki_page_menu
+        module_index_menu
+        module_group_menu
+        module_index_menu_modal
+        module_menu_modal
+      ]
       tools = GuardRail.activate(:secondary) do
-        ContextExternalTool.all_tools_for(@context, placements: placements,
-                                                    root_account: @domain_root_account, current_user: @current_user).to_a
+        Lti::ContextToolFinder.new(
+          @context, placements: placements,
+                    root_account: @domain_root_account, current_user: @current_user
+        ).all_tools_sorted_array
       end
-      placements.select { |p| @menu_tools[p] = tools.select { |t| t.has_placement? p } }
 
-      favorites_enabled = @domain_root_account&.feature_enabled?(:commons_favorites)
-      @module_index_tools = favorites_enabled ? external_tools_display_hashes(:module_index_menu) : []
-      @module_group_tools = favorites_enabled ? external_tools_display_hashes(:module_group_menu) : []
-      @module_menu_tools = GuardRail.activate(:secondary) do
-        ContextExternalTool.all_tools_for(@context, placements: :module_index_menu_modal,
-                                                    root_account: @domain_root_account, current_user: @current_user).to_a
+      @menu_tools = {}
+      placements.each do |p|
+        @menu_tools[p] = tools.select { |t| t.has_placement? p }
       end
-      module_menu_tool_definitions = Lti::AppLaunchCollator.launch_definitions(@module_menu_tools, [:module_index_menu_modal])
 
-      module_file_details = load_module_file_details if @context.grants_right?(@current_user, session, :manage_content)
+      # only show tray tools when feature flag is enabled
+      unless @domain_root_account&.feature_enabled?(:commons_favorites)
+        @menu_tools[:module_index_menu] = []
+        @menu_tools[:module_group_menu] = []
+      end
+
+      if @context.grants_any_right?(@current_user, session, :manage_content, *RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS)
+        module_file_details = load_module_file_details
+      end
       js_env course_id: @context.id,
              CONTEXT_URL_ROOT: polymorphic_path([@context]),
              FILES_CONTEXTS: [{ asset_string: @context.asset_string }],
@@ -105,8 +123,7 @@ class ContextModulesController < ApplicationController
                usage_rights_required: @context.usage_rights_required?,
                manage_files_edit: @context.grants_right?(@current_user, session, :manage_files_edit)
              },
-             MODULE_TRAY_TOOLS: { module_index_menu: @module_index_tools, module_group_menu: @module_group_tools },
-             MODULE_MENU_TOOLS: module_menu_tool_definitions,
+             MODULE_TOOLS: module_tool_definitions,
              DEFAULT_POST_TO_SIS: @context.account.sis_default_grade_export[:value] && !AssignmentUtil.due_date_required_for_account?(@context.account),
              new_quizzes_modules_support: Account.site_admin.feature_enabled?(:new_quizzes_modules_support)
 
@@ -124,6 +141,19 @@ class ContextModulesController < ApplicationController
     end
 
     private
+
+    def module_tool_definitions
+      tools = {}
+      # commons favorites tray placements expect tool in display_hash format
+      %i[module_index_menu module_group_menu].each do |type|
+        tools[type] = @menu_tools[type].map { |t| external_tool_display_hash(t, type) }
+      end
+      # newer modal placements expect tool in launch_definition format
+      %i[module_index_menu_modal module_menu_modal].each do |type|
+        tools[type] = Lti::AppLaunchCollator.launch_definitions(@menu_tools[type], [type])
+      end
+      tools
+    end
 
     def combined_active_quizzes
       classic_quizzes = @context
@@ -333,9 +363,9 @@ class ContextModulesController < ApplicationController
         m.save_without_touching_context
         Canvas::LiveEvents.module_updated(m) if m.position != order_before[m.id]
       end
-      # Update pace plans if enabled
-      if @context.account.feature_enabled?(:pace_plans) && @context.enable_pace_plans
-        @context.pace_plans.primary.find_each(&:create_publish_progress)
+      # Update course paces if enabled
+      if @context.account.feature_enabled?(:course_paces) && @context.enable_course_paces
+        @context.course_paces.published.find_each(&:create_publish_progress)
       end
       @context.touch
 
@@ -352,7 +382,7 @@ class ContextModulesController < ApplicationController
       all_tags = GuardRail.activate(:secondary) { @context.module_items_visible_to(@current_user).to_a }
       user_is_admin = @context.grants_right?(@current_user, session, :read_as_admin)
 
-      ActiveRecord::Associations::Preloader.new.preload(all_tags, :content)
+      ActiveRecord::Associations.preload(all_tags, :content)
 
       preload_assignments_and_quizzes(all_tags, user_is_admin)
 
@@ -636,6 +666,7 @@ class ContextModulesController < ApplicationController
         published: @tag.published?,
         publishable_id: module_item_publishable_id(@tag),
         unpublishable: module_item_unpublishable?(@tag),
+        publish_at: module_item_publish_at(@tag),
         graded: @tag.graded?,
         content_details: content_details(@tag, @current_user),
         assignment_id: @tag.assignment.try(:id),
@@ -746,7 +777,7 @@ class ContextModulesController < ApplicationController
 
     content_with_assignments = assignment_tags
                                .select { |ct| ct.content_type != "Assignment" && ct.content.assignment_id }.map(&:content)
-    ActiveRecord::Associations::Preloader.new.preload(content_with_assignments, :assignment) if content_with_assignments.any?
+    ActiveRecord::Associations.preload(content_with_assignments, :assignment) if content_with_assignments.any?
 
     if user_is_admin && should_preload_override_data?
       assignments = assignment_tags.filter_map(&:assignment)
@@ -757,7 +788,7 @@ class ContextModulesController < ApplicationController
       overrideables = (assignments + plain_quizzes).reject(&:has_too_many_overrides)
 
       if overrideables.any?
-        ActiveRecord::Associations::Preloader.new.preload(overrideables, :assignment_overrides)
+        ActiveRecord::Associations.preload(overrideables, :assignment_overrides)
         overrideables.each { |o| o.has_no_overrides = true if o.assignment_overrides.empty? }
       end
     end
@@ -793,7 +824,7 @@ class ContextModulesController < ApplicationController
   end
 
   def update_module_link_default_tab(tag)
-    if Account.site_admin.feature_enabled?(:remember_module_links_default) && LINK_ITEM_TYPES.include?(tag.content_type)
+    if LINK_ITEM_TYPES.include?(tag.content_type)
       current_value = @current_user.get_preference(:module_links_default_new_tab)
       if current_value && !tag.new_tab
         @current_user.set_preference(:module_links_default_new_tab, false)

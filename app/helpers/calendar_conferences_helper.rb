@@ -21,10 +21,26 @@
 module CalendarConferencesHelper
   include Api::V1::Conferences
 
+  def find_and_update_or_initialize_calendar_event(context, calendar_event_params, override_params = {})
+    return nil if calendar_event_params.blank?
+
+    valid_params = calendar_event_params.merge(override_params).slice(:web_conference, :title, :context_code, :start_at, :end_at, :description)
+    if calendar_event_params[:web_conference].calendar_event
+      CalendarEvent.find(calendar_event_params[:web_conference].calendar_event.id).tap do |event|
+        if event.grants_right?(@current_user, session, :update)
+          event.context = context
+          event.assign_attributes(valid_params)
+        end
+      end
+    elsif calendar_event_params[:title].present?
+      context.calendar_events.build(valid_params)
+    end
+  end
+
   def find_or_initialize_conference(context, conference_params, override_params = {})
     return nil if conference_params.blank?
 
-    valid_params = conference_params.merge(override_params).slice(:title, :description, :conference_type, :lti_settings, :user_settings)
+    valid_params = conference_params.merge(override_params).slice(:title, :description, :conference_type, :lti_settings, :user_settings, :start_at, :end_at)
 
     if conference_params[:id]
       WebConference.find(conference_params[:id]).tap do |conf|
@@ -33,7 +49,7 @@ module CalendarConferencesHelper
           conf.assign_attributes(valid_params)
         end
       end
-    elsif conference_params[:title].present?
+    else
       context.web_conferences.build(valid_params).tap do |conf|
         conf.user = @current_user
         conf.settings[:default_return_url] = named_context_url(context, :context_url, include_host: true)

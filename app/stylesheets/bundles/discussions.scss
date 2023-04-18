@@ -118,7 +118,7 @@ $discussion-dark-text: $ic-color-dark;
   }
 }
 
-body.responsive_awareness .span4.discussion-header__metadata {
+.discussion-header__metadata {
   @include mobile-only {
     width: auto;
   }
@@ -281,6 +281,10 @@ body.responsive_awareness .span4.discussion-header__metadata {
 
 .discussion-rate-action {
   margin-#{direction(left)}: 12px;
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
 }
 
 .discussion-rate-action--checked {
@@ -685,17 +689,9 @@ body.responsive_awareness .span4.discussion-header__metadata {
     background: $lightBackground;
     min-height: 53px;
     box-shadow: 0 2px 3px rgba(black, 0.1);
-
-    body:not(.responsive_awareness) & {
+    @include breakpoint(tablet) {
       margin-#{direction(left)}: $ic-header-primary-width + ($ic-sp*2);
       margin-#{direction(right)}: $ic-sp*2;
-    }
-
-    body.responsive_awareness & {
-      @include breakpoint(tablet) {
-        margin-#{direction(left)}: $ic-header-primary-width + ($ic-sp*2);
-        margin-#{direction(right)}: $ic-sp*2;
-      }
     }
   }
   [disabled] {
@@ -730,6 +726,16 @@ body.responsive_awareness .span4.discussion-header__metadata {
 }
 
 #discussion-toolbar {
+  #onlyUnread:focus +label[for="onlyUnread"] {
+    outline: 1px solid var(--ic-link-color);
+    outline-offset: 1px;
+  }
+
+  #showDeleted:focus +label[for="showDeleted"] {
+    outline: 1px solid var(--ic-link-color);
+    outline-offset: 1px;
+  }
+
   .topic-subscribe-button { display:none; }
   .topic-unsubscribe-button { display:none; }
 

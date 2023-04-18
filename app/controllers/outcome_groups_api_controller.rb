@@ -361,7 +361,7 @@ class OutcomeGroupsApiController < ApplicationController
     outcome_params[:context] = @context
 
     # preload the links' outcomes' contexts.
-    ActiveRecord::Associations::Preloader.new.preload(@links, learning_outcome_content: :context)
+    ActiveRecord::Associations.preload(@links, learning_outcome_content: :context)
 
     if context&.root_account&.feature_enabled?(:improved_outcomes_management) && Account.site_admin.feature_enabled?(:outcomes_friendly_description)
       account = @context.is_a?(Account) ? @context : @context.account
@@ -455,7 +455,7 @@ class OutcomeGroupsApiController < ApplicationController
   # @argument ratings[][points] [Integer]
   #   The points corresponding to a rating level for the embedded rubric criterion.
   #
-  # @argument calculation_method [String, "decaying_average"|"n_mastery"|"latest"|"highest"]
+  # @argument calculation_method [String, "decaying_average"|"n_mastery"|"latest"|"highest"|"average"]
   #   The new calculation method.  Defaults to "decaying_average"
   #
   # @argument calculation_int [Integer]

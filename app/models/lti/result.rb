@@ -31,7 +31,7 @@ class Lti::Result < ApplicationRecord
 
   validates :line_item, :user, presence: true
   validates :result_maximum, presence: true, unless: proc { |r| r.read_attribute(:result_score).blank? }
-  validates :result_score, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :result_score, numericality: true, allow_nil: true
   validates :result_maximum, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
   validate do |result|
     if result.result_maximum == 0 && line_item&.score_maximum != 0
@@ -105,6 +105,14 @@ class Lti::Result < ApplicationRecord
       WHERE submission_id=#{submission.id.to_i}
     SQL
     connection.execute(update_query)
+  end
+
+  def needs_review?
+    grading_progress == "PendingManual"
+  end
+
+  def mark_reviewed!
+    update!(grading_progress: "FullyGraded")
   end
 
   private

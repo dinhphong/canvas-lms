@@ -97,6 +97,11 @@ class Types::MutationType < Types::ApplicationObjectType
   field :update_learning_outcome_group, mutation: Mutations::UpdateLearningOutcomeGroup
   field :create_learning_outcome_group, mutation: Mutations::CreateLearningOutcomeGroup
   field :update_isolated_view_deeply_nested_alert, mutation: Mutations::UpdateIsolatedViewDeeplyNestedAlert
+  field :create_internal_setting, mutation: Mutations::CreateInternalSetting
+  field :update_internal_setting, mutation: Mutations::UpdateInternalSetting
+  field :delete_internal_setting, mutation: Mutations::DeleteInternalSetting
+  field :update_submissions_read_state, mutation: Mutations::UpdateSubmissionsReadState
+  field :update_submission_grade, mutation: Mutations::UpdateSubmissionGrade
 
   # TODO: Remove the in active development string from here once this is more
   #       finalized.

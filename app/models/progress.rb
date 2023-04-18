@@ -21,7 +21,7 @@
 class Progress < ActiveRecord::Base
   belongs_to :context, polymorphic:
       [:content_migration, :course, :account, :group_category, :content_export,
-       :assignment, :attachment, :epub_export, :sis_batch, :pace_plan,
+       :assignment, :attachment, :epub_export, :sis_batch, :course_pace,
        { context_user: "User", quiz_statistics: "Quizzes::QuizStatistics" }]
   belongs_to :user
   belongs_to :delayed_job, class_name: "::Delayed::Job", optional: true
@@ -47,6 +47,11 @@ class Progress < ActiveRecord::Base
     state :failed
   end
 
+  set_policy do
+    given { |user| self.user.present? && self.user == user }
+    can :cancel
+  end
+
   def reset!
     self.results = nil
     self.workflow_state = "queued"
@@ -69,7 +74,7 @@ class Progress < ActiveRecord::Base
     update_completion!(100.0 * @current_value / @total)
   end
 
-  def increment_completion!(increment)
+  def increment_completion!(increment = 1)
     raise "`increment_completion!` can only be invoked after a total has been set with `calculate_completion!`" if @total.nil?
 
     @current_value += increment

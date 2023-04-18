@@ -28,6 +28,11 @@
 #       "id": "Page",
 #       "description": "",
 #       "properties": {
+#         "page_id": {
+#           "description": "the ID of the page",
+#           "example": 1,
+#           "type": "integer"
+#         },
 #         "url": {
 #           "description": "the unique locator for the page",
 #           "example": "my-page-title",
@@ -71,6 +76,11 @@
 #           "description": "whether the page is published (true) or draft state (false).",
 #           "example": true,
 #           "type": "boolean"
+#         },
+#         "publish_at": {
+#           "description": "scheduled publication date for this page",
+#           "example": "2022-09-01T00:00:00",
+#           "type": "datetime"
 #         },
 #         "front_page": {
 #           "description": "whether this page is the front page for the wiki",
@@ -136,13 +146,22 @@
 #       }
 #     }
 #
+# __Note on page identifiers__
+#
+# Most Pages API endpoints accept identification of the Page as either a URL
+# or an ID. In ambiguous cases, the URL takes precedence.
+#
+# For example, if you have a page whose ID is 7 and another whose ID is 8 and whose URL is "7",
+# the endpoint `/api/v1/courses/:course_id/pages/7` will refer to the latter (ID 8).
+# To explicitly request by ID, you can use the form `/api/v1/courses/:course_id/pages/page_id:7`.
+#
 class WikiPagesApiController < ApplicationController
   before_action :require_context
   before_action :get_wiki_page, except: [:create, :index]
   before_action :require_wiki_page, except: %i[create update update_front_page index]
   before_action :was_front_page, except: [:index]
   before_action only: %i[show update destroy revisions show_revision revert] do
-    check_differentiated_assignments(@page) if @context.feature_enabled?(:conditional_release)
+    check_differentiated_assignments(@page) if @context.conditional_release?
   end
 
   include Api::V1::WikiPage
@@ -312,6 +331,11 @@ class WikiPagesApiController < ApplicationController
   # @argument wiki_page[front_page] [Boolean]
   #   Set an unhidden page as the front page (if true)
   #
+  # @argument wiki_page[publish_at] [Optional, DateTime]
+  #   Schedule a future date/time to publish the page. This will have no effect unless the
+  #   "Scheduled Page Publication" feature is enabled in the account. If a future date is
+  #   supplied, the page will be unpublished and wiki_page[published] will be ignored.
+  #
   # @example_request
   #     curl -X POST -H 'Authorization: Bearer <token>' \
   #     https://<canvas>/api/v1/courses/123/pages \
@@ -320,8 +344,8 @@ class WikiPagesApiController < ApplicationController
   #
   # @returns Page
   def create
-    initial_params = params.permit(:url)
-    initial_params.merge!(params[:wiki_page] ? params[:wiki_page].permit(:url, :title) : {})
+    initial_params = params.permit(:url_or_id)
+    initial_params.merge!(params[:wiki_page] ? params[:wiki_page].permit(:url_or_id, :title) : {})
 
     @wiki = @context.wiki
     @page = @wiki.build_wiki_page(@current_user, initial_params)
@@ -330,12 +354,14 @@ class WikiPagesApiController < ApplicationController
       assign_todo_date
       if !update_params.is_a?(Symbol) && @page.update(update_params) && process_front_page
         log_asset_access(@page, "wiki", @wiki, "participate")
-        apply_assignment_parameters(assignment_params, @page) if @context.feature_enabled?(:conditional_release)
+        apply_assignment_parameters(assignment_params, @page) if @context.conditional_release?
         render json: wiki_page_json(@page, @current_user, session)
       else
         render json: @page.errors, status: update_params.is_a?(Symbol) ? update_params : :bad_request
       end
     end
+  rescue Api::Html::UnparsableContentError => e
+    rescue_unparsable_content(e)
   end
 
   # @API Show page
@@ -344,7 +370,7 @@ class WikiPagesApiController < ApplicationController
   #
   # @example_request
   #     curl -H 'Authorization: Bearer <token>' \
-  #          https://<canvas>/api/v1/courses/123/pages/my-page-url
+  #          https://<canvas>/api/v1/courses/123/pages/the-page-identifier
   #
   # @returns Page
   def show
@@ -380,15 +406,25 @@ class WikiPagesApiController < ApplicationController
   # @argument wiki_page[published] [Boolean]
   #   Whether the page is published (true) or draft state (false).
   #
+  # @argument wiki_page[publish_at] [Optional, DateTime]
+  #   Schedule a future date/time to publish the page. This will have no effect unless the
+  #   "Scheduled Page Publication" feature is enabled in the account. If a future date is
+  #   set and the page is already published, it will be unpublished.
+  #
   # @argument wiki_page[front_page] [Boolean]
   #   Set an unhidden page as the front page (if true)
   #
   # @example_request
   #     curl -X PUT -H 'Authorization: Bearer <token>' \
-  #     https://<canvas>/api/v1/courses/123/pages/the-page-url \
+  #     https://<canvas>/api/v1/courses/123/pages/the-page-identifier \
   #     -d 'wiki_page[body]=Updated+body+text'
   #
   # @returns Page
+  #
+  # NOTE: You cannot specify the ID when creating a page. If you pass a numeric value
+  # as the page identifier and that does not represent a page ID that already
+  # exists, it will be interpreted as a URL.
+  #
   def update
     perform_update = false
     if @page.new_record?
@@ -405,12 +441,14 @@ class WikiPagesApiController < ApplicationController
       if !update_params.is_a?(Symbol) && @page.update(update_params) && process_front_page
         log_asset_access(@page, "wiki", @wiki, "participate")
         @page.context_module_action(@current_user, @context, :contributed)
-        apply_assignment_parameters(assignment_params, @page) if @context.feature_enabled?(:conditional_release)
+        apply_assignment_parameters(assignment_params, @page) if @context.conditional_release?
         render json: wiki_page_json(@page, @current_user, session)
       else
         render json: @page.errors, status: update_params.is_a?(Symbol) ? update_params : :bad_request
       end
     end
+  rescue Api::Html::UnparsableContentError => e
+    rescue_unparsable_content(e)
   end
 
   # @API Delete page
@@ -419,7 +457,7 @@ class WikiPagesApiController < ApplicationController
   #
   # @example_request
   #     curl -X DELETE -H 'Authorization: Bearer <token>' \
-  #     https://<canvas>/api/v1/courses/123/pages/the-page-url
+  #     https://<canvas>/api/v1/courses/123/pages/the-page-identifier
   #
   # @returns Page
   def destroy
@@ -443,7 +481,7 @@ class WikiPagesApiController < ApplicationController
   #
   # @example_request
   #     curl -H 'Authorization: Bearer <token>' \
-  #     https://<canvas>/api/v1/courses/123/pages/the-page-url/revisions
+  #     https://<canvas>/api/v1/courses/123/pages/the-page-identifier/revisions
   #
   # @returns [PageRevision]
   def revisions
@@ -465,11 +503,11 @@ class WikiPagesApiController < ApplicationController
   #
   # @example_request
   #     curl -H 'Authorization: Bearer <token>' \
-  #     https://<canvas>/api/v1/courses/123/pages/the-page-url/revisions/latest
+  #     https://<canvas>/api/v1/courses/123/pages/the-page-identifier/revisions/latest
   #
   # @example_request
   #     curl -H 'Authorization: Bearer <token>' \
-  #     https://<canvas>/api/v1/courses/123/pages/the-page-url/revisions/4
+  #     https://<canvas>/api/v1/courses/123/pages/the-page-identifier/revisions/4
   #
   # @returns PageRevision
   def show_revision
@@ -522,7 +560,7 @@ class WikiPagesApiController < ApplicationController
   #
   # @example_request
   #    curl -X POST -H 'Authorization: Bearer <token>' \
-  #    https://<canvas>/api/v1/courses/123/pages/the-page-url/revisions/6
+  #    https://<canvas>/api/v1/courses/123/pages/the-page-identifier/revisions/6
   #
   # @returns PageRevision
   def revert
@@ -552,7 +590,7 @@ class WikiPagesApiController < ApplicationController
       @wiki = @context.wiki
 
       # attempt to find an existing page
-      @url = params[:url]
+      @url = params[:url_or_id]
       @page = if is_front_page_action?
                 @wiki.front_page
               else
@@ -588,7 +626,7 @@ class WikiPagesApiController < ApplicationController
 
   def get_update_params(allowed_fields = Set[])
     # normalize parameters
-    page_params = params[:wiki_page] ? params[:wiki_page].permit(*%w[title body notify_of_update published front_page editing_roles]) : {}
+    page_params = params[:wiki_page] ? params[:wiki_page].permit(*%w[title body notify_of_update published front_page editing_roles publish_at]) : {}
 
     if page_params.key?(:published)
       published_value = page_params.delete(:published)
@@ -684,7 +722,7 @@ class WikiPagesApiController < ApplicationController
   def assign_todo_date
     return if params.dig(:wiki_page, :student_todo_at).nil? && params.dig(:wiki_page, :student_planner_checkbox).nil?
 
-    if @page.context.grants_any_right?(@current_user, session, :manage_content)
+    if @page.context.grants_any_right?(@current_user, session, :manage_content, :manage_course_content_edit)
       @page.todo_date = params.dig(:wiki_page, :student_todo_at) if params.dig(:wiki_page, :student_todo_at)
       # Only clear out if the checkbox is explicitly specified in the request
       if params[:wiki_page].key?("student_planner_checkbox") &&
@@ -713,5 +751,13 @@ class WikiPagesApiController < ApplicationController
     @page.set_as_front_page! if !@wiki.has_front_page? && @page.is_front_page? && !@page.deleted?
 
     true
+  end
+
+  private
+
+  def rescue_unparsable_content(error)
+    @page.errors.add(:body, error.message) if @page.present?
+
+    render json: @page&.errors || {}, status: :bad_request
   end
 end

@@ -116,8 +116,11 @@ module SectionTabHelper
             !new_collaborations_enabled
           elsif tab_is?(tab, "TAB_CONFERENCES")
             !WebConference.config(context: @context)
-          elsif quiz_lti_tab?(tab)
+          elsif Lti::ExternalToolTab.tool_for_tab(tab)&.quiz_lti?
             !new_quizzes_navigation_placements_enabled?(context)
+          elsif tab_is?(tab, "TAB_PEOPLE")
+            # can't manage people in template courses
+            context.is_a?(Course) && context.template?
           end
         end
       end
@@ -146,15 +149,7 @@ module SectionTabHelper
     end
 
     def tab_is?(tab, const_name)
-      context.class.const_defined?(const_name) && tab[:id] == context.class.const_get(const_name)
-    end
-
-    def quiz_lti_tab?(tab)
-      if tab[:id].is_a?(String) && tab[:id].start_with?("context_external_tool_") && tab[:args] && tab[:args][1]
-        return ContextExternalTool.find_by(id: tab[:args][1])&.quiz_lti?
-      end
-
-      false
+      Api::V1::Tab.tab_is?(tab, context, const_name)
     end
   end
 
@@ -211,6 +206,7 @@ module SectionTabHelper
 
     def a_tag
       content_tag(:a, a_attributes) do
+        concat(indicate_new)
         concat(@tab.label)
         concat(indicate_hidden)
       end
@@ -224,6 +220,16 @@ module SectionTabHelper
       return unless @tab.hide? || @tab.unused?
 
       "<i class='nav-icon icon-off' aria-hidden='true' role='presentation'></i>".html_safe
+    end
+
+    # include the css_class of tabs here to show a "new" pill in the nav
+    # hide the "new" pill by adding the css_class to the :visited_tabs user preference
+    NEW_TABS = %w[account_calendars].freeze
+
+    def indicate_new
+      return unless NEW_TABS.include? @tab.css_class
+
+      "<span class='new-tab-indicator nav-icon' data-tabname='#{@tab.css_class}'></span>".html_safe
     end
 
     def to_html

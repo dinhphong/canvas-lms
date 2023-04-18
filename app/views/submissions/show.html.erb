@@ -184,14 +184,14 @@
         %>
           <% unread_comments =
                @context.root_account.feature_enabled?(:submission_feedback_indicators) &&
-               @current_user.unread_rubric_comments?(@submission) %>
+               @current_user.unread_rubric_assessments?(@submission) %>
           <div class="submission-details-header__rubric <% if can_do(@assignment, @current_user, :grade) %>submission-details-header__rubric--can-grade<% end %>">
             <a href="#" class="assess_submission_link Button Button--small Button--link" tabindex='0' title="<%= unread_comments ? t('There are unread rubric comments.') : '' %>">
               <i class="icon-rubric" aria-hidden="true"></i><%= t('show_rubric', 'Show Rubric') %>
             </a>
             <% if unread_comments %>
               <span class="rubric_comment unread_indicator" aria-hidden="true"></span>
-              <% js_env mark_rubric_comments_read_url: api_v1_course_submission_rubric_comments_mark_read_url(@context.id, @assignment.id, @submission.user.id) %>
+              <% js_env mark_rubric_comments_read_url: api_v1_course_submission_rubric_assessments_mark_read_url(@context.id, @assignment.id, @submission.user.id) %>
             <% end %>
           </div>
         <% end %>
@@ -208,6 +208,8 @@
             <span class="submission-late-pill"></span>
           <% elsif @submission.missing? %>
             <span class="submission-missing-pill"></span>
+          <% elsif @submission.extended? %>
+            <span class="submission-extended-pill"></span>
           <% end %>
           <% if @assignment.allowed_attempts&.> 0 %>
             <div class="submission-details-header__attempts_info">
@@ -386,7 +388,11 @@
           <div style="padding: 10px; <%= hidden unless can_do(@submission, @current_user, :comment) %>" id="add_comment_form">
             <label class="add_a_comment">
               <strong><%= before_label('add_a_comment', 'Add a Comment') %></strong>
-              <textarea class="ic-Input grading_comment"></textarea>
+              <div id="textarea-container">
+                <textarea class="ic-Input grading_comment"></textarea>
+                <span id="emoji-picker-container"></span>
+              </div>
+              <div id="emoji-quick-picker-container"></div>
             </label>
             <div class="comment_attachments">
             </div>

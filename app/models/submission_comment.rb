@@ -361,9 +361,9 @@ class SubmissionComment < ActiveRecord::Base
   end
 
   def self.preload_attachments(comments)
-    ActiveRecord::Associations::Preloader.new.preload(comments, [:submission])
+    ActiveRecord::Associations.preload(comments, [:submission])
     submissions = comments.map(&:submission).uniq
-    ActiveRecord::Associations::Preloader.new.preload(submissions, assignment: :attachments)
+    ActiveRecord::Associations.preload(submissions, assignment: :attachments)
   end
 
   def update_submission
@@ -410,6 +410,10 @@ class SubmissionComment < ActiveRecord::Base
   def update_participation
     # id_changed? because new_record? is false in after_save callbacks
     if saved_change_to_id? || (saved_change_to_hidden? && !hidden?)
+      if Account.site_admin.feature_enabled?(:visibility_feedback_student_grades_page)
+        return update_participation_with_ff_on
+      end
+
       return if submission.user_id == author_id
       return if submission.assignment.deleted? || !submission.posted?
       return if provisional_grade_id.present?
@@ -423,6 +427,17 @@ class SubmissionComment < ActiveRecord::Base
                                                 workflow_state: "unread",
                                               })
       end
+    end
+  end
+
+  def update_participation_with_ff_on
+    return if submission.user_id == author_id
+    return if submission.assignment.deleted?
+    return if provisional_grade_id.present?
+
+    self.class.connection.after_transaction_commit do
+      submission.user.clear_cache_key(:submissions)
+      submission.mark_item_unread("comment")
     end
   end
 

@@ -27,13 +27,15 @@ class OutcomeCalculationMethod < ApplicationRecord
     n_mastery
     highest
     latest
+    average
   ].freeze
 
   VALID_CALCULATION_INTS = {
     "decaying_average" => (1..99),
-    "n_mastery" => (1..5),
+    "n_mastery" => (1..10),
     "highest" => [].freeze,
     "latest" => [].freeze,
+    "average" => [].freeze,
   }.freeze
 
   belongs_to :context, polymorphic: [:account, :course], required: true

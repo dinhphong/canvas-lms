@@ -563,6 +563,10 @@ class GroupsController < ApplicationController
   # @argument sis_group_id [String]
   #   The sis ID of the group. Must have manage_sis permission to set.
   #
+  # @argument override_sis_stickiness [boolean]
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
+  #
   # @example_request
   #     curl https://<canvas>/api/v1/groups/<group_id> \
   #          -X PUT \
@@ -607,7 +611,11 @@ class GroupsController < ApplicationController
       end
       respond_to do |format|
         @group.transaction do
-          @group.update(attrs.slice(*SETTABLE_GROUP_ATTRIBUTES))
+          if params[:override_sis_stickiness] && !value_to_boolean(params[:override_sis_stickiness])
+            @group.update(attrs.slice(*(SETTABLE_GROUP_ATTRIBUTES - @group.stuck_sis_fields.map(&:to_s))))
+          else
+            @group.update(attrs.slice(*SETTABLE_GROUP_ATTRIBUTES))
+          end
           if attrs[:members]
             user_ids = Api.value_to_array(attrs[:members]).map(&:to_i).uniq
             users = if @group.context

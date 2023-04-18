@@ -19,9 +19,11 @@
 #
 
 module OutcomesFeaturesHelper
-  def individual_outcome_rating_and_calculation_enabled?(context)
-    context.root_account.feature_enabled?(:improved_outcomes_management) &&
-      context.root_account.feature_enabled?(:individual_outcome_rating_and_calculation) &&
-      !context.root_account.feature_enabled?(:account_level_mastery_scales)
+  def account_level_mastery_scales_enabled?(context)
+    context&.root_account&.feature_enabled?(:account_level_mastery_scales)
+  end
+
+  def outcome_alignment_summary_enabled?(context)
+    context&.root_account&.feature_enabled?(:outcome_alignment_summary)
   end
 end

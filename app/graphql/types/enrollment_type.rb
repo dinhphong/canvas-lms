@@ -137,5 +137,44 @@ module Types
     private :load_grades
 
     field :last_activity_at, DateTimeType, null: true
+    def last_activity_at
+      return nil unless enrollment.user == current_user || enrollment.course.grants_right?(current_user, session, :read_reports)
+
+      object.last_activity_at
+    end
+
+    field :total_activity_time, Integer, null: true
+    def total_activity_time
+      return nil unless enrollment.user == current_user || enrollment.course.grants_right?(current_user, session, :read_reports)
+
+      object.total_activity_time
+    end
+
+    field :sis_role, String, null: true
+
+    field :html_url, UrlType, null: true
+    def html_url
+      return nil unless context[:course]
+
+      GraphQLHelpers::UrlHelpers.course_user_url(
+        course_id: context[:course].id,
+        id: enrollment.user.id,
+        host: context[:request].host_with_port
+      )
+    end
+
+    field :can_be_removed, Boolean, null: true
+    def can_be_removed
+      return nil unless context[:course]
+
+      (!enrollment.defined_by_sis? ||
+        context[:domain_root_account].grants_any_right?(
+          current_user,
+          context[:session],
+          :manage_account_settings,
+          :manage_sis
+        )
+      ) && enrollment.can_be_deleted_by(current_user, context[:course], context[:session])
+    end
   end
 end

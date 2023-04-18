@@ -69,6 +69,7 @@ class User < ActiveRecord::Base
   has_many :viewed_submission_comments, dependent: :destroy
 
   has_many :enrollments, dependent: :destroy
+  has_many :course_paces, dependent: :destroy
 
   has_many :not_ended_enrollments, -> { where("enrollments.workflow_state NOT IN ('rejected', 'completed', 'deleted', 'inactive')") }, class_name: "Enrollment", multishard: true
   has_many :not_removed_enrollments, -> { where.not(workflow_state: %w[rejected deleted inactive]) }, class_name: "Enrollment", multishard: true
@@ -104,6 +105,7 @@ class User < ActiveRecord::Base
   has_many :current_group_memberships, -> { eager_load(:group).where("group_memberships.workflow_state = 'accepted' AND groups.workflow_state<>'deleted'") }, class_name: "GroupMembership"
   has_many :current_groups, through: :current_group_memberships, source: :group
   has_many :user_account_associations
+  has_many :unordered_associated_accounts, source: :account, through: :user_account_associations
   has_many :associated_accounts, -> { order("user_account_associations.depth") }, source: :account, through: :user_account_associations
   has_many :associated_root_accounts, -> { merge(Account.root_accounts.active) }, source: :account, through: :user_account_associations, multishard: true
   has_many :developer_keys
@@ -434,7 +436,7 @@ class User < ActiveRecord::Base
                     .merge(enrollment_scope.except(:joins))
                     .where(enrollments: { associated_user_id: associated_user.id })
     else
-      join = associated_user == self ? :non_observer_enrollments : :all_enrollments
+      join = associated_user == self ? :enrollments_excluding_linked_observers : :all_enrollments
       scope = Course.active.joins(join).merge(enrollment_scope.except(:joins)).distinct
     end
 
@@ -1230,24 +1232,30 @@ class User < ActiveRecord::Base
 
   set_policy do
     given { |user| user == self }
-    can :read and
-      can :read_grades and
-      can :read_profile and
-      can :read_as_admin and
-      can :manage and
-      can :manage_content and
-      can :manage_files_add and
-      can :manage_files_edit and
-      can :manage_files_delete and
-      can :manage_calendar and
-      can :send_messages and
-      can :update_avatar and
-      can :view_feature_flags and
-      can :manage_feature_flags and
-      can :api_show_user and
-      can :read_email_addresses and
-      can :view_user_logins and
-      can :generate_observer_pairing_code
+    can %i[
+      read
+      read_grades
+      read_profile
+      read_files
+      read_as_admin
+      manage
+      manage_content
+      manage_course_content_add
+      manage_course_content_edit
+      manage_course_content_delete
+      manage_files_add
+      manage_files_edit
+      manage_files_delete
+      manage_calendar
+      send_messages
+      update_avatar
+      view_feature_flags
+      manage_feature_flags
+      api_show_user
+      read_email_addresses
+      view_user_logins
+      generate_observer_pairing_code
+    ]
 
     given { |user| user == self && user.user_can_edit_name? }
     can :rename
@@ -1279,10 +1287,10 @@ class User < ActiveRecord::Base
     can :view_statistics
 
     given { |user| check_accounts_right?(user, :manage_students) }
-    can :read_profile and can :view_statistics and can :read_reports and can :read_grades
+    can :read_profile and can :read_reports and can :read_grades
 
     given { |user| check_accounts_right?(user, :manage_user_logins) }
-    can :read and can :read_reports and can :read_profile and can :api_show_user and can :terminate_sessions
+    can %i[read read_reports read_profile api_show_user terminate_sessions read_files]
 
     given { |user| check_accounts_right?(user, :read_roster) }
     can :read_full_profile and can :api_show_user
@@ -1324,7 +1332,7 @@ class User < ActiveRecord::Base
     can :reset_mfa
 
     given { |user| user && user.as_observer_observation_links.where(user_id: id).exists? }
-    can :read and can :read_as_parent
+    can %i[read read_as_parent read_files]
 
     given { |user| check_accounts_right?(user, :moderate_user_content) }
     can :moderate_user_content
@@ -1336,8 +1344,47 @@ class User < ActiveRecord::Base
     return true if fake_student? && courses.any? { |c| c.grants_right?(masquerader, :use_student_view) }
     return false unless
         account.grants_right?(masquerader, nil, :become_user) && SisPseudonym.for(self, account, type: :implicit, require_sis: false)
+    # self is not an account user
+    if account.root_account.feature_enabled?(:course_admin_role_masquerade_permission_check) && account_users.empty?
+      return includes_subset_of_course_admin_permissions?(masquerader, account)
+    end
 
     has_subset_of_account_permissions?(masquerader, account)
+  end
+
+  def self.all_course_admin_type_permissions_for(user)
+    enrollments = user.enrollments.active.of_admin_type
+    result = {}
+
+    RoleOverride.permissions.each_key do |permission|
+      # initialize all permissions
+      result[permission] ||= []
+
+      enrollments.find_each do |enrollment|
+        # if available, iterate and set permissions that are enabled
+        # through the user's active course admin enrollments
+        enrollment.has_permission_to?(permission) == false ? next : result[permission] << true
+      end
+    end
+    result
+  end
+
+  def includes_subset_of_course_admin_permissions?(user, account)
+    return true if user == self
+    return false unless account.root_account?
+
+    Rails.cache.fetch(["includes_subset_of_course_admin_permissions", self, user, account].cache_key, expires_in: 60.minutes) do
+      current_permissions = AccountUser.all_permissions_for(user, account)
+      sought_permissions = User.all_course_admin_type_permissions_for(self)
+      sought_permissions.all? do |(permission, sought_permission)|
+        next true unless sought_permission.present?
+
+        current_permission = current_permissions[permission]
+        return false if current_permission.empty?
+
+        true
+      end
+    end
   end
 
   def has_subset_of_account_permissions?(user, account)
@@ -1607,9 +1654,17 @@ class User < ActiveRecord::Base
 
   def apply_contrast(colors)
     colors.each do |key, _v|
-      until WCAGColorContrast.ratio(colors[key].delete("#"), "ffffff") >= 4.5
-        rgb = colors[key].match(/^#(..)(..)(..)$/).captures.map { |c| (c.hex.to_i * 0.85).round }
-        colors[key] = "#%02x%02x%02x" % rgb
+      darkened_color = colors[key]
+      begin
+        until WCAGColorContrast.ratio(darkened_color.delete("#"), "ffffff") >= 4.5
+          darkened_color = "##{darkened_color.delete("#").chars.map { |c| c + c }.join}" if darkened_color.length == 4
+          rgb = darkened_color.match(/^#(..)(..)(..)$/).captures.map { |c| (c.hex.to_i * 0.85).round }
+          darkened_color = "#%02x%02x%02x" % rgb
+        end
+      rescue => e
+        Canvas::Errors.capture(e, {}, :info)
+      else
+        colors[key] = darkened_color
       end
     end
   end
@@ -1714,17 +1769,22 @@ class User < ActiveRecord::Base
     set_preference(:unread_submission_annotations, submission.global_id, nil)
   end
 
-  def unread_rubric_comments?(submission)
+  def unread_rubric_assessments?(submission)
     !!get_preference(:unread_rubric_comments, submission.global_id)
   end
 
-  def mark_rubric_comments_unread!(submission)
+  def mark_rubric_assessments_unread!(submission)
     set_preference(:unread_rubric_comments, submission.global_id, true)
   end
 
-  def mark_rubric_comments_read!(submission)
+  def mark_rubric_assessments_read!(submission)
     # this will delete the user_preference_value
     set_preference(:unread_rubric_comments, submission.global_id, nil)
+  end
+
+  def add_to_visited_tabs(tab_class)
+    visited_tabs = get_preference(:visited_tabs) || []
+    set_preference(:visited_tabs, [*visited_tabs, tab_class]) unless visited_tabs.include? tab_class
   end
 
   def prefers_high_contrast?
@@ -1891,7 +1951,7 @@ class User < ActiveRecord::Base
         end
         pending_enrollments = temporary_invitations
         unless pending_enrollments.empty?
-          ActiveRecord::Associations::Preloader.new.preload(pending_enrollments, :course)
+          ActiveRecord::Associations.preload(pending_enrollments, :course)
           res.concat(pending_enrollments.map do |e|
             c = e.course
             c.primary_enrollment_type = e.type
@@ -1954,7 +2014,7 @@ class User < ActiveRecord::Base
         Canvas::Builders::EnrollmentDateBuilder.preload_state(enrollments)
       end
       if opts[:preload_courses]
-        ActiveRecord::Associations::Preloader.new.preload(enrollments, :course)
+        ActiveRecord::Associations.preload(enrollments, :course)
       end
       enrollments
     end
@@ -1970,7 +2030,10 @@ class User < ActiveRecord::Base
       enrollments << pending_enrollment
     end
     enrollments += temporary_invitations
-    ActiveRecord::Associations::Preloader.new.preload(enrollments, :course) if opts[:preload_course]
+
+    if opts[:preload_course]
+      ActiveRecord::Associations.preload(enrollments, :course)
+    end
     enrollments
   end
 
@@ -2140,7 +2203,7 @@ class User < ActiveRecord::Base
           submissions = submissions.uniq
           submissions.first(limit)
 
-          ActiveRecord::Associations::Preloader.new.preload(submissions, [{ assignment: :context }, :user, :submission_comments])
+          ActiveRecord::Associations.preload(submissions, [{ assignment: :context }, :user, :submission_comments])
           submissions
         end
       end
@@ -2352,7 +2415,12 @@ class User < ActiveRecord::Base
 
   def cached_course_ids_for_observed_user(observed_user)
     Rails.cache.fetch_with_batched_keys(["course_ids_for_observed_user", self, observed_user].cache_key, batch_object: self, batched_keys: :enrollments, expires_in: 1.day) do
-      enrollments.shard(in_region_associated_shards).active_or_pending.of_observer_type.where(associated_user_id: observed_user).pluck(:course_id)
+      enrollments
+        .shard(in_region_associated_shards)
+        .active_or_pending_by_date
+        .of_observer_type
+        .where(associated_user_id: observed_user)
+        .pluck(:course_id)
     end
   end
 
@@ -2590,9 +2658,17 @@ class User < ActiveRecord::Base
     end
   end
 
+  def root_admin_for?(root_account)
+    root_ids = [root_account.id, Account.site_admin.id]
+    account_users.any? { |au| root_ids.include?(au.account_id) }
+  end
+
   def eportfolios_enabled?
-    accounts = associated_root_accounts.reject(&:site_admin?)
-    accounts.empty? || accounts.any? { |a| a.settings[:enable_eportfolios] != false }
+    # For jobs/rails consoles/specs where domain root account is not set
+    return true unless Account.current_domain_root_account
+
+    associated_root_accounts.empty? ||
+      (associated_root_accounts.include?(Account.current_domain_root_account) && Account.current_domain_root_account.settings[:enable_eportfolios] != false)
   end
 
   def initiate_conversation(users, private = nil, options = {})
@@ -2689,7 +2765,7 @@ class User < ActiveRecord::Base
                     else
                       favorites + courses.reject { |c| can_favorite.call(c) }
                     end
-    ActiveRecord::Associations::Preloader.new.preload(@menu_courses, :enrollment_term)
+    ActiveRecord::Associations.preload(@menu_courses, :enrollment_term)
     @menu_courses
   end
 
@@ -2709,7 +2785,7 @@ class User < ActiveRecord::Base
   end
 
   def can_create_enrollment_for?(course, session, type)
-    return false if type == "StudentEnrollment" && MasterCourses::MasterTemplate.is_master_course?(course)
+    return false if %w[StudentEnrollment ObserverEnrollment].include?(type) && MasterCourses::MasterTemplate.is_master_course?(course)
     return false if course.template?
 
     if course.root_account.feature_enabled?(:granular_permissions_manage_users)
@@ -2968,6 +3044,14 @@ class User < ActiveRecord::Base
     associated_shards.select { |shard| shard.in_current_region? || shard.default? }
   end
 
+  def adminable_accounts_cache_key
+    ["adminable_accounts_1", self, ApplicationController.region].cache_key
+  end
+
+  def clear_adminable_accounts_cache!
+    Rails.cache.delete(adminable_accounts_cache_key)
+  end
+
   def adminable_accounts_scope
     # i couldn't get EXISTS (?) to work multi-shard, so this is happening instead
     account_ids = account_users.active.shard(in_region_associated_shards).distinct.pluck(:account_id)
@@ -2976,7 +3060,7 @@ class User < ActiveRecord::Base
 
   def adminable_accounts
     @adminable_accounts ||= shard.activate do
-      Rails.cache.fetch(["adminable_accounts_1", self, ApplicationController.region].cache_key) do
+      Rails.cache.fetch(adminable_accounts_cache_key) do
         adminable_accounts_scope.order(:id).to_a
       end
     end
@@ -3139,8 +3223,7 @@ class User < ActiveRecord::Base
 
     if account_users.any?
       roles << "admin"
-      root_ids = [root_account.id, Account.site_admin.id]
-      roles << "root_admin" if account_users.any? { |au| root_ids.include?(au.account_id) }
+      roles << "root_admin" if root_admin_for?(root_account)
       roles << "consortium_admin" if account_users.any? { |au| au.shard != root_account.shard }
     end
     roles

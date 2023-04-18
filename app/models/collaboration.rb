@@ -75,8 +75,25 @@ class Collaboration < ActiveRecord::Base
     given { |user, session| context.grants_right?(user, session, :create_collaborations) }
     can :create
 
-    given { |user, session| context.grants_right?(user, session, :manage_content) }
+    #################### Begin legacy permission block #########################
+    given do |user, session|
+      user && !context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_content)
+    end
     can :read and can :update and can :delete
+    ##################### End legacy permission block ##########################
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_course_content_edit)
+    end
+    can :read and can :update
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_coure_content_delete)
+    end
+    can :read and can :delete
 
     given do |user, session|
       user && user_id == user.id &&
@@ -180,7 +197,8 @@ class Collaboration < ActiveRecord::Base
     plugin_collabs = collaboration_types.any? do |type|
       collaboration_class(type["type"].titleize.gsub(/\s/, "")).present?
     end
-    external_tool_collabs = ContextExternalTool.all_tools_for(context, placements: :collaboration).exists?
+    external_tool_collabs =
+      Lti::ContextToolFinder.all_tools_scope_union(context, placements: :collaboration).exists?
     plugin_collabs || external_tool_collabs
   end
 

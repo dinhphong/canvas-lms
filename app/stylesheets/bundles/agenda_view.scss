@@ -299,22 +299,28 @@ span.agendaView--no-assignments {
 .rs-section {
   border: none;
   padding: 0;
-  margin: 0 0 $ic-sp*2;
+  margin: 0 0 $ic-sp*3;
   &:last-of-type { margin-bottom: 0; }
 }
 
-#context-list-holder, #undated-events {
+#calendar-list-holder, #other-calendars-list-holder, #undated-events {
   background-color: #fff;
   max-height: 300px;
   overflow-y: auto;
+  min-height: 100px;
 
   ul {
     margin-bottom: 10px;
     &:last-of-type { margin-bottom: 0; }
   }
+  .accounts-empty-state {
+    @include fontSize(13px);
+    color: #888;
+    margin: $ic-sp*1;
+  }
 }
 
-#context-list {
+#calendars-context-list, #other-calendars-context-list {
   padding: 0;
   max-height: none;
   .context_list_context {
@@ -333,10 +339,14 @@ span.agendaView--no-assignments {
     @include fontSize(13px);
     font-weight: bold;
   }
+  .buttons-wrapper{
+    float: direction(right);
+  }
 }
 
 #calendar-toggle-button,
-#undated-events-button {
+#undated-events-button,
+#other-calendars-toggle-button {
   text-transform: uppercase;
 }
 

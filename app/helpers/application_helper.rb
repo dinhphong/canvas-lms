@@ -175,15 +175,13 @@ module ApplicationHelper
     object.grants_any_right?(user, session, *actions)
   end
 
-  def load_scripts_async_in_order(script_urls)
+  def load_scripts_async_in_order(script_urls, cors_anonymous: false)
     # this is how you execute scripts in order, in a way that doesn’t block rendering,
     # and without having to use 'defer' to wait until the whole DOM is loaded.
     # see: https://www.html5rocks.com/en/tutorials/speed/script-loading/
     javascript_tag "
       ;#{script_urls.map { |url| javascript_path(url) }}.forEach(function(src) {
-        var s = document.createElement('script')
-        s.src = src
-        s.async = false
+        var s = document.createElement('script'); s.src = src; s.async = false;#{" s.crossOrigin = 'anonymous';" if cors_anonymous}
         document.head.appendChild(s)
       });"
   end
@@ -199,16 +197,15 @@ module ApplicationHelper
     paths << "/timezone/#{js_env[:CONTEXT_TIMEZONE]}.js" if js_env[:CONTEXT_TIMEZONE]
     paths << "/timezone/#{js_env[:BIGEASY_LOCALE]}.js" if js_env[:BIGEASY_LOCALE]
 
-    @script_chunks = []
-
     # if there is a moment locale besides english set, put a script tag for it
     # so it is loaded and ready before we run any of our app code
     if js_env[:MOMENT_LOCALE] && js_env[:MOMENT_LOCALE] != "en"
-      @script_chunks += ::Canvas::Cdn.registry.scripts_for(
+      paths += ::Canvas::Cdn.registry.scripts_for(
         "moment/locale/#{js_env[:MOMENT_LOCALE]}"
       )
     end
-    @script_chunks += ::Canvas::Cdn.registry.scripts_for("main")
+
+    @script_chunks = ::Canvas::Cdn.registry.scripts_for("main")
     @script_chunks.uniq!
 
     chunk_urls = @script_chunks
@@ -217,9 +214,10 @@ module ApplicationHelper
       # if we don't also put preload tags for these, the browser will prioritize and
       # download the bundle chunks we preload below before these scripts
       paths.each { |url| concat preload_link_tag(javascript_path(url)) }
-      chunk_urls.each { |url| concat preload_link_tag(url) }
+      chunk_urls.each { |url| concat preload_link_tag(url, crossorigin: "anonymous") }
 
-      concat load_scripts_async_in_order(paths + chunk_urls)
+      concat load_scripts_async_in_order(paths)
+      concat load_scripts_async_in_order(chunk_urls, cors_anonymous: true)
       concat include_js_bundles
     end
   end
@@ -291,10 +289,9 @@ module ApplicationHelper
   end
 
   def css_variant(opts = {})
-    variant = use_responsive_layout? ? "responsive_layout" : "new_styles"
     use_high_contrast =
       @current_user&.prefers_high_contrast? || opts[:force_high_contrast]
-    variant + (use_high_contrast ? "_high_contrast" : "_normal_contrast") +
+    "new_styles" + + (use_high_contrast ? "_high_contrast" : "_normal_contrast") +
       (I18n.rtl? ? "_rtl" : "")
   end
 
@@ -338,62 +335,6 @@ module ApplicationHelper
 
   def include_common_stylesheets
     stylesheet_link_tag css_url_for(:common), media: "all"
-  end
-
-  def quiz_lti_tab?(tab)
-    if tab[:id].is_a?(String) && tab[:id].start_with?("context_external_tool_") && tab[:args] &&
-       tab[:args][1]
-      return ContextExternalTool.find_by(id: tab[:args][1])&.quiz_lti?
-    end
-
-    false
-  end
-
-  def sortable_tabs
-    tabs =
-      @context.tabs_available(
-        @current_user,
-        for_reordering: true,
-        root_account: @domain_root_account,
-        course_subject_tabs: @context.try(:elementary_subject_course?)
-      )
-    tabs.select do |tab|
-      if begin
-        tab[:id] == @context.class::TAB_COLLABORATIONS
-      rescue
-        false
-      end
-        Collaboration.any_collaborations_configured?(@context) &&
-          !@context.feature_enabled?(:new_collaborations)
-      elsif begin
-        quiz_lti_tab?(tab)
-      rescue
-        false
-      end
-        new_quizzes_navigation_placements_enabled?(@context)
-      elsif begin
-        tab[:id] == @context.class::TAB_COLLABORATIONS_NEW
-      rescue
-        false
-      end
-        @context.feature_enabled?(:new_collaborations)
-      elsif begin
-        tab[:id] == @context.class::TAB_CONFERENCES
-      rescue
-        false
-      end
-        feature_enabled?(:web_conferences)
-      else
-        tab[:id] !=
-          (
-            begin
-              @context.class::TAB_SETTINGS
-            rescue
-              nil
-            end
-          )
-      end
-    end
   end
 
   def embedded_chat_quicklaunch_params
@@ -563,13 +504,13 @@ module ApplicationHelper
           )
       end
     end
-
     {
       equellaEnabled: !!equella_enabled?,
       disableGooglePreviews: !service_enabled?(:google_docs_previews),
       logPageViews: !@body_class_no_headers,
       editorButtons: editor_buttons,
-      pandaPubSettings: CanvasPandaPub::Client.config.try(:slice, "push_url", "application_id")
+      pandaPubSettings: CanvasPandaPub::Client.config.try(:slice, "push_url", "application_id"),
+      unsplashEnabled: PluginSetting.settings_for_plugin(:unsplash)&.dig("access_key")&.present?
     }.each do |key, value|
       # dont worry about keys that are nil or false because in javascript: if (INST.featureThatIsUndefined ) { //won't happen }
       global_inst_object[key] = value if value
@@ -579,6 +520,9 @@ module ApplicationHelper
   end
 
   def editor_buttons
+    # called outside of Lti::ContextToolFinder to make sure that
+    # @context is non-nil and also a type of Context that would have
+    # tools in it (ie Course/Account/Group/User)
     contexts = ContextExternalTool.contexts_to_search(@context)
     return [] if contexts.empty?
 
@@ -586,13 +530,7 @@ module ApplicationHelper
       Rails
       .cache
       .fetch((["editor_buttons_for2"] + contexts.uniq).cache_key) do
-        tools =
-          ContextExternalTool
-          .shard(@context.shard)
-          .active
-          .having_setting("editor_button")
-          .where(context: contexts)
-          .order(:id)
+        tools = Lti::ContextToolFinder.new(@context, type: :editor_button).all_tools_scope_union.to_unsorted_array.sort_by(&:id)
 
         # force the YAML to be deserialized before caching, since it's expensive
         tools.each(&:settings)
@@ -772,12 +710,13 @@ module ApplicationHelper
       if ignore_branding
         nil
       else
-        # If the user is actively working on unapplied changes in theme editor, session[:brand_config_md5]
-        # will either be the md5 of the thing they are working on or `false`, meaning they want
-        # to start from a blank slate.
+        # If the user is actively working on unapplied changes in theme editor, session[:brand_config]
+        # will contain either the md5 of the thing they are working on (potentially an inherited parent
+        # config) or `nil`, meaning there is no inherited config and we are working from the default brand config.
         brand_config =
-          if session.key?(:brand_config_md5)
-            BrandConfig.where(md5: session[:brand_config_md5]).first
+          if session.key?(:brand_config)
+            BrandConfig.shard(@domain_root_account.account_chain(include_site_admin: true).pluck(:shard).uniq)
+                       .where(md5: session[:brand_config][:md5]).first
           else
             account = brand_config_account(opts)
             if opts[:ignore_parents]
@@ -973,19 +912,16 @@ module ApplicationHelper
   end
 
   def add_uri_scheme_name(uri)
-    noSchemeName = !uri.match(%r{^(.+)://(.+)})
-    uri = "http://" + uri if noSchemeName
+    no_scheme_name = !uri.match(%r{^(.+)://(.+)})
+    uri = "http://" + uri if no_scheme_name
     uri
   end
 
   def agree_to_terms
     # may be overridden by a plugin
     @agree_to_terms ||
-      t(
-        "I agree to the *terms of use*.",
-        wrapper: {
-          "*" => link_to('\1', "#", class: "terms_of_service_link")
-        }
+      I18n.t(
+        "I agree to the *terms of use*.", wrapper: '<span class="terms_of_service_link">\1</span>'
       )
   end
 
@@ -1058,7 +994,7 @@ module ApplicationHelper
               .where(context_type: "Submission")
               .preload(:context)
               .to_a
-            ActiveRecord::Associations::Preloader.new.preload(
+            ActiveRecord::Associations.preload(
               aas.map(&:submission),
               assignment: :context
             )
@@ -1175,12 +1111,12 @@ module ApplicationHelper
   def link_to_parent_signup(auth_type)
     data = reg_link_data(auth_type)
     link_to(
-      t("Parents sign up here"),
+      I18n.t("Parents sign up here"),
       "#",
       id: "signup_parent",
       class: "signup_link",
       data: data,
-      title: t("Parent Signup")
+      title: I18n.t("Parent Signup")
     )
   end
 
@@ -1201,8 +1137,8 @@ module ApplicationHelper
 
   def planner_enabled?
     !!@current_user&.has_student_enrollment? ||
-      (Account.site_admin.feature_enabled?(:k5_parent_support) && @current_user&.roles(@domain_root_account)&.include?("observer") && k5_user?) ||
-      (!!@current_user&.roles(@domain_root_account)&.include?("observer") && Account.site_admin.feature_enabled?(:observer_picker)) # TODO: ensure observee is a student?
+      (@current_user&.roles(@domain_root_account)&.include?("observer") && k5_user?) ||
+      !!@current_user&.roles(@domain_root_account)&.include?("observer") # TODO: ensure observee is a student?
   end
 
   def will_paginate(collection, options = {})
@@ -1441,8 +1377,6 @@ module ApplicationHelper
     if @domain_root_account.feature_enabled?(:account_level_mastery_scales)
       js_env(
         ACCOUNT_LEVEL_MASTERY_SCALES: true,
-        IMPROVED_OUTCOMES_MANAGEMENT:
-          @domain_root_account.feature_enabled?(:improved_outcomes_management),
         MASTERY_SCALE: {
           outcome_proficiency: @context.resolved_outcome_proficiency&.as_json,
           outcome_calculation_method: @context.resolved_outcome_calculation_method&.as_json
@@ -1457,13 +1391,17 @@ module ApplicationHelper
       !@current_user.fake_student? && !@current_user.used_feature?(:cc_prefs) && !k5_student
   end
 
-  def individual_outcome_rating_and_calculation_js_env
-    if @domain_root_account.feature_enabled?(:individual_outcome_rating_and_calculation) && !@domain_root_account.feature_enabled?(:account_level_mastery_scales)
-      js_env(
-        INDIVIDUAL_OUTCOME_RATING_AND_CALCULATION: true,
-        IMPROVED_OUTCOMES_MANAGEMENT:
-          @domain_root_account.feature_enabled?(:improved_outcomes_management)
-      )
-    end
+  def improved_outcomes_management_js_env
+    js_env(
+      IMPROVED_OUTCOMES_MANAGEMENT: @domain_root_account.feature_enabled?(:improved_outcomes_management)
+    )
+  end
+
+  def append_default_due_time_js_env(context, hash)
+    hash[:DEFAULT_DUE_TIME] = context.default_due_time if context&.default_due_time.present? && context.root_account.feature_enabled?(:default_due_time)
+  end
+
+  def find_heap_application_id
+    DynamicSettings.find(tree: :private)[:heap_app_id]
   end
 end

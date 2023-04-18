@@ -22,9 +22,7 @@
   <% js_env :PASSWORD_POLICY => (@domain_root_account.try(:password_policy) || {}) %>
   <fieldset
     id="login_information"
-    <% if @domain_root_account.feature_enabled?(:responsive_misc) %>
-      class="responsive"
-    <% end %>
+    class="responsive"
   >
     <legend>
       <h4 class="profileHeader">
@@ -37,7 +35,7 @@
         <tr class="login<%= ' blank' unless pseudonym %>" <%= raw %Q(style="display: none") unless pseudonym %>>
           <td class="sso-icon" <%= raw %Q(data-pseudonym-id="#{pseudonym.id}") if pseudonym %>>
             <% if lookup_context.template_exists?("shared/svg/_svg_icon_#{pseudonym.try(:authentication_provider).try(:auth_type)}.svg") %>
-              <%= render(partial: "shared/svg/svg_icon_#{pseudonym.authentication_provider.auth_type}.svg") %>
+              <%= render(partial: "shared/svg/svg_icon_#{pseudonym.authentication_provider.auth_type}", formats: [:svg]) %>
               <span class="screenreader-only">
                 <%= t("This login is for %{provider}", provider: pseudonym.authentication_provider.class.display_name) %>
               </span>
@@ -134,14 +132,9 @@
         <td><%= f.blabel :unique_id, :en => "Login" %></td>
         <td><%= f.text_field :unique_id %></td>
       </tr>
-      <tr style="display:none;" class="sis_user_id">
-        <td><%= f.blabel :sis_user_id, :en => "SIS ID" %></td>
-        <td><%= f.text_field :sis_user_id %></td>
-      </tr>
-      <tr style="display:none;" class="integration_id">
-        <td><%= f.blabel :integration_id, :en => "Integration ID" %></td>
-        <td><%= f.text_field :integration_id %></td>
-      </tr>
+      <tr data-react-component="external-ids" />
+      <tr class="sis_user_id" data-external-placeholder="sis-user-id" data-label="<%= before_label('sis_id', 'SIS ID') %>" />
+      <tr class="integration_id" data-external-placeholder="integration-id" data-label="<%= before_label('integration_id', 'Integration ID') %>" />
       <% if can_do(Account.site_admin, @current_user, :manage_user_logins) %>
         <% js_env :PASSWORD_POLICIES => Hash[Account.root_accounts.active.non_shadow.map{ |a| [a.id, a.password_policy]}] %>
         <tr class="account_id">

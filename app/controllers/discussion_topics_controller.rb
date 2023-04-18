@@ -355,10 +355,11 @@ class DiscussionTopicsController < ApplicationController
       scope = scope.active.where("delayed_post_at IS NULL OR delayed_post_at<?", Time.now.utc)
     end
 
+    @topics = []
     if @context.is_a?(Group) || request.format.json?
       @topics = Api.paginate(scope, self, topic_pagination_url)
       if params[:exclude_context_module_locked_topics]
-        ActiveRecord::Associations::Preloader.new.preload(@topics, context_module_tags: :context_module)
+        ActiveRecord::Associations.preload(@topics, context_module_tags: :context_module)
         @topics = DiscussionTopic.reject_context_module_locked_topics(@topics, @current_user)
       end
 
@@ -378,7 +379,7 @@ class DiscussionTopicsController < ApplicationController
                   named_context_url(@context, :context_discussion_topics_url))
 
         if @context.is_a?(Group)
-          ActiveRecord::Associations::Preloader.new.preload(@topics, context_module_tags: :context_module)
+          ActiveRecord::Associations.preload(@topics, context_module_tags: :context_module)
           locked_topics, open_topics = @topics.partition do |topic|
             locked = topic.locked? || topic.locked_for?(@current_user)
             locked.is_a?(Hash) ? locked[:can_view] : locked
@@ -419,13 +420,13 @@ class DiscussionTopicsController < ApplicationController
             create: @context.discussion_topics.temp_record.grants_right?(@current_user, session, :create),
             moderate: user_can_moderate,
             change_settings: user_can_edit_course_settings?,
-            manage_content: @context.grants_right?(@current_user, session, :manage_content),
+            manage_content: @context.grants_any_right?(@current_user, session, :manage_content, :manage_course_content_edit),
             publish: user_can_moderate,
             read_as_admin: @context.grants_right?(@current_user, session, :read_as_admin),
           },
           discussion_topic_menu_tools: external_tools_display_hashes(:discussion_topic_menu),
-          student_reporting_enabled: Account.site_admin.feature_enabled?(:discussions_reporting),
-          discussion_anonymity_enabled: @context.feature_enabled?(:react_discussions_post) && Account.site_admin.feature_enabled?(:discussion_anonymity),
+          student_reporting_enabled: @context.feature_enabled?(:react_discussions_post),
+          discussion_anonymity_enabled: @context.feature_enabled?(:react_discussions_post),
           discussion_topic_index_menu_tools: (if @domain_root_account&.feature_enabled?(:commons_favorites)
                                                 external_tools_display_hashes(:discussion_topic_index_menu)
                                               else
@@ -439,7 +440,7 @@ class DiscussionTopicsController < ApplicationController
         append_sis_data(hash)
         js_env(hash)
         js_env({
-                 DIRECT_SHARE_ENABLED: @context.is_a?(Course) && hash[:permissions][:read_as_admin]
+                 DIRECT_SHARE_ENABLED: @context.is_a?(Course) && (hash[:permissions][:manage_content] || (@context.concluded? && hash[:permissions][:read_as_admin]))
                }, true)
         set_tutorial_js_env
 
@@ -457,6 +458,12 @@ class DiscussionTopicsController < ApplicationController
 
         render html: "", layout: true
       end
+
+      InstStatsd::Statsd.increment("discussion_topic.index.visit")
+      InstStatsd::Statsd.count("discussion_topic.index.visit.pinned", @topics&.select { |dt| dt.pinned }&.count)
+      InstStatsd::Statsd.count("discussion_topic.index.visit.discussions", @topics&.length)
+      InstStatsd::Statsd.count("discussion_topic.index.visit.closed_for_comments", @topics&.select { |dt| dt.locked }&.count)
+
       format.json do
         log_api_asset_access(["topics", @context], "topics", "other")
         if @context.grants_right?(@current_user, session, :moderate_forum)
@@ -494,6 +501,14 @@ class DiscussionTopicsController < ApplicationController
     @topic = @context.send(params[:is_announcement] ? :announcements : :discussion_topics).new
     add_discussion_or_announcement_crumb
     add_crumb t :create_new_crumb, "Create new"
+
+    if @context.root_account.feature_enabled?(:discussion_create)
+      js_env({ is_announcement: params[:is_announcement] })
+      js_bundle :discussion_topic_edit_v2
+      css_bundle :discussions_index, :learning_outcomes
+      render html: "", layout: params[:embed] == "true" ? "mobile_embed" : true
+      return
+    end
     edit
   end
 
@@ -515,7 +530,8 @@ class DiscussionTopicsController < ApplicationController
         CAN_CREATE_ASSIGNMENT: @context.respond_to?(:assignments) && @context.assignments.temp_record.grants_right?(@current_user, session, :create),
         CAN_ATTACH: @topic.grants_right?(@current_user, session, :attach),
         CAN_MODERATE: user_can_moderate,
-        CAN_SET_GROUP: can_set_group_category
+        CAN_SET_GROUP: can_set_group_category,
+        CAN_EDIT_GRADES: can_do(@context, @current_user, :manage_grades)
       }
     }
 
@@ -586,12 +602,11 @@ class DiscussionTopicsController < ApplicationController
       ANNOUNCEMENTS_LOCKED: announcements_locked?,
       CREATE_ANNOUNCEMENTS_UNLOCKED: @current_user.create_announcements_unlocked?,
       USAGE_RIGHTS_REQUIRED: usage_rights_required,
+      IS_MODULE_ITEM: !@topic.context_module_tags.empty?,
       PERMISSIONS: {
         manage_files: @context.grants_any_right?(@current_user, session, *RoleOverride::GRANULAR_FILE_PERMISSIONS)
       },
       REACT_DISCUSSIONS_POST: @context.feature_enabled?(:react_discussions_post),
-      ANONYMOUS_DISCUSSIONS: Account.site_admin.feature_enabled?(:discussion_anonymity),
-      PARTIAL_ANONYMITY: Account.site_admin.feature_enabled?(:partial_anonymity),
       allow_student_anonymous_discussion_topics: @context.allow_student_anonymous_discussion_topics,
       context_is_not_group: !@context.is_a?(Group)
     }
@@ -601,7 +616,8 @@ class DiscussionTopicsController < ApplicationController
     if post_to_sis && @topic.new_record?
       js_hash[:POST_TO_SIS_DEFAULT] = @context.account.sis_default_grade_export[:value]
     end
-    js_hash[:STUDENT_PLANNER_ENABLED] = @context.grants_any_right?(@current_user, session, :manage_content)
+    js_hash[:STUDENT_PLANNER_ENABLED] =
+      @context.grants_any_right?(@current_user, session, :manage_content, *RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS)
 
     if @topic.is_section_specific && @context.is_a?(Course)
       selected_section_ids = @topic.discussion_topic_section_visibilities.pluck(:course_section_id)
@@ -641,12 +657,13 @@ class DiscussionTopicsController < ApplicationController
     if context.is_a?(Course)
       js_hash[:allow_self_signup] = true # for group creation
       js_hash[:group_user_type] = "student"
+      append_default_due_time_js_env(@context, js_hash)
     end
     js_env(js_hash)
 
     set_master_course_js_env_data(@topic, @context)
     conditional_release_js_env(@topic.assignment)
-    render :edit
+    render :edit, layout: params[:embed] == "true" ? "mobile_embed" : true
   end
 
   def show
@@ -658,6 +675,7 @@ class DiscussionTopicsController < ApplicationController
     @sequence_asset = @context_module_tag.try(:content)
     add_discussion_or_announcement_crumb
     add_crumb(@topic.title, named_context_url(@context, :context_discussion_topic_url, @topic.id))
+    @page_title = join_title(t("#titles.topic", "Topic"), @topic.title)
 
     if @topic.deleted?
       flash[:notice] = I18n.t :deleted_topic_notice, "That topic has been deleted"
@@ -737,19 +755,42 @@ class DiscussionTopicsController < ApplicationController
         )
       end
 
+      unless can_read_and_visible
+        return render_unauthorized_action unless @current_user
+
+        respond_to do |format|
+          if @topic.is_announcement
+            flash[:error] = t "You do not have access to the requested announcement."
+            format.html do
+              redirect_to named_context_url(@context, :context_announcements_url)
+              return
+            end
+          else
+            flash[:error] = t "You do not have access to the requested discussion."
+            format.html do
+              redirect_to named_context_url(@context, :context_discussion_topics_url)
+              return
+            end
+          end
+        end
+      end
+
+      edit_url = context_url(@topic.context, :edit_context_discussion_topic_url, @topic)
+      edit_url += "?embed=true" if params[:embed] == "true"
+
       js_env({
                course_id: params[:course_id] || @context.course&.id,
-               EDIT_URL: context_url(@topic.context, :edit_context_discussion_topic_url, @topic),
+               EDIT_URL: edit_url,
                PEER_REVIEWS_URL: @topic.assignment ? context_url(@topic.assignment.context, :context_assignment_peer_reviews_url, @topic.assignment.id) : nil,
                discussion_topic_id: params[:id],
                manual_mark_as_read: @current_user&.manual_mark_as_read?,
                discussion_topic_menu_tools: external_tools_display_hashes(:discussion_topic_menu),
-               rce_mentions_in_discussions: Account.site_admin.feature_enabled?(:rce_mentions_in_discussions) && !@topic.anonymous?,
+               rce_mentions_in_discussions: @context.feature_enabled?(:react_discussions_post) && !@topic.anonymous?,
                isolated_view: Account.site_admin.feature_enabled?(:isolated_view),
+               split_screen_view: Account.site_admin.feature_enabled?(:split_screen_view),
+               discussion_grading_view: Account.site_admin.feature_enabled?(:discussion_grading_view),
                draft_discussions: Account.site_admin.feature_enabled?(:draft_discussions),
-               student_reporting_enabled: Account.site_admin.feature_enabled?(:discussions_reporting),
-               discussion_anonymity_enabled: @context.feature_enabled?(:react_discussions_post) && Account.site_admin.feature_enabled?(:discussion_anonymity),
-               inline_grading_enabled: Account.site_admin.feature_enabled?(:discussions_inline_grading),
+               discussion_anonymity_enabled: @context.feature_enabled?(:react_discussions_post),
                should_show_deeply_nested_alert: @current_user&.should_show_deeply_nested_alert?,
                # GRADED_RUBRICS_URL must be within DISCUSSION to avoid page error
                DISCUSSION: {
@@ -762,9 +803,15 @@ class DiscussionTopicsController < ApplicationController
                  Base64.encode64("#{@current_user.uuid}vyfW=;[p-0?:{P_\=HUpgraqe;njalkhpvoiulkimmaqewg")
              })
 
+      unless @locked
+        InstStatsd::Statsd.increment("discussion_topic.visit.redesign")
+        InstStatsd::Statsd.count("discussion_topic.visit.entries.redesign", @topic.discussion_entries.count)
+        InstStatsd::Statsd.count("discussion_topic.visit.pages.redesign", (@topic.discussion_entries.count / 20).ceil)
+      end
+
       js_bundle :discussion_topics_post
       css_bundle :discussions_index, :learning_outcomes
-      render html: "", layout: true
+      render html: "", layout: params[:embed] == "true" ? "mobile_embed" : true
       return
     end
 
@@ -893,6 +940,12 @@ class DiscussionTopicsController < ApplicationController
             conditional_release_js_env(@topic.assignment, includes: [:rule])
             js_bundle :discussion_topic
             css_bundle :tinymce, :discussions, :learning_outcomes
+
+            unless @locked
+              InstStatsd::Statsd.increment("discussion_topic.visit.legacy")
+              InstStatsd::Statsd.count("discussion_topic.visit.entries.legacy", @topic.discussion_entries.count)
+              InstStatsd::Statsd.count("discussion_topic.visit.pages.legacy", (@topic.discussion_entries.count / 50).ceil)
+            end
 
             render stream: can_stream_template?
           end
@@ -1245,8 +1298,7 @@ class DiscussionTopicsController < ApplicationController
   def process_discussion_topic_runner(is_new:)
     @errors = {}
 
-    anonymous_discussions_disabled = !(Account.site_admin.feature_enabled?(:discussion_anonymity) && @context.feature_enabled?(:react_discussions_post))
-    if is_new && anonymous_discussions_disabled
+    if is_new && !@context.feature_enabled?(:react_discussions_post)
       params[:anonymous_state] = nil
     end
 
@@ -1384,6 +1436,47 @@ class DiscussionTopicsController < ApplicationController
 
         include_usage_rights = @context.root_account.feature_enabled?(:usage_rights_discussion_topics) &&
                                @context.try(:usage_rights_required?)
+
+        if is_new
+          InstStatsd::Statsd.increment("discussion_topic.created")
+
+          if params[:podcast_enabled] == "1"
+            InstStatsd::Statsd.increment("discussion_topic.created.podcast_feed_enabled")
+          end
+
+          if params[:allow_rating] == "1"
+            InstStatsd::Statsd.increment("discussion_topic.created.allow_liking_enabled")
+          end
+
+          if params[:attachment]
+            InstStatsd::Statsd.increment("discussion_topic.created.attachment")
+          end
+
+          if !params[:delayed_post_at]&.empty? || !params[:lock_at]&.empty?
+            InstStatsd::Statsd.increment("discussion_topic.created.scheduled")
+          end
+
+          if params[:anonymous_state] == "partial_anonymity"
+            InstStatsd::Statsd.increment("discussion_topic.created.partial_anonymity")
+          end
+
+          if params[:anonymous_state] == "full_anonymity"
+            InstStatsd::Statsd.increment("discussion_topic.created.full_anonymity")
+          end
+
+          if params[:assignment]
+            InstStatsd::Statsd.increment("discussion_topic.created.graded")
+          end
+
+          if @context.is_a?(Group)
+            InstStatsd::Statsd.increment("discussion_topic.created.group")
+          end
+
+          if request.params[:assignment] && request.params[:assignment][:assignment_overrides] && request.params[:assignment][:assignment_overrides].length > 1
+            InstStatsd::Statsd.increment("discussion_topic.created.multiple_due_dates")
+          end
+        end
+
         if @context.is_a?(Course)
           render json: discussion_topic_api_json(@topic,
                                                  @context,
@@ -1429,7 +1522,7 @@ class DiscussionTopicsController < ApplicationController
     end
     return unless params[:todo_date]
 
-    if !authorized_action(@topic.context, @current_user, :manage_content)
+    if !authorized_action(@topic.context, @current_user, [:manage_content, :manage_course_content_add])
       @errors[:todo_date] = t(:error_todo_date_unauthorized,
                               "You do not have permission to add this topic to the student to-do list.")
     elsif (@topic.assignment || params[:assignment]) && !remove_assign
@@ -1655,7 +1748,8 @@ class DiscussionTopicsController < ApplicationController
       if @topic.podcast_enabled
         content_for_head helpers.auto_discovery_link_tag(:rss,
                                                          feeds_topic_format_path(@topic.id, rss_context.feed_code, :rss),
-                                                         { title: t(:discussion_podcast_feed_title, "Discussion Podcast Feed") })
+                                                         { title: t(:discussion_podcast_feed_title, "Discussion Podcast Feed"),
+                                                           id: "Discussion Podcast Feed" })
       end
     end
   end

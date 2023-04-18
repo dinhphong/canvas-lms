@@ -64,14 +64,22 @@ class UnreadCommentCountLoader < GraphQL::Batch::Loader
   end
 end
 
-class SubmissionRubricAssessmentFilterInputType < Types::BaseInputObject
-  graphql_name "SubmissionRubricAssessmentFilterInput"
+module Types
+  class SubmissionRubricAssessmentFilterInputType < Types::BaseInputObject
+    graphql_name "SubmissionRubricAssessmentFilterInput"
 
-  argument :for_attempt, Integer, <<~MD, required: false, default_value: nil
-    What submission attempt the rubric assessment should be returned for. If not
-    specified, it will return the rubric assessment for the current submisssion
-    or submission history.
-  MD
+    argument :for_attempt, Integer, <<~MD, required: false, default_value: nil
+      What submission attempt the rubric assessment should be returned for. If not
+      specified, it will return the rubric assessment for the current submisssion
+      or submission history.
+    MD
+  end
+
+  class SubmissionCommentsSortOrderType < Types::BaseEnum
+    graphql_name "SubmissionCommentsSortOrderType"
+    value "asc", value: :asc
+    value "desc", value: :desc
+  end
 end
 
 module Interfaces::SubmissionInterface
@@ -83,6 +91,7 @@ module Interfaces::SubmissionInterface
     graphql_name "LatePolicyStatusType"
     value "late"
     value "missing"
+    value "extended"
     value "none"
   end
 
@@ -134,8 +143,9 @@ module Interfaces::SubmissionInterface
 
   field :comments_connection, Types::SubmissionCommentType.connection_type, null: true do
     argument :filter, Types::SubmissionCommentFilterInputType, required: false, default_value: {}
+    argument :sort_order, Types::SubmissionCommentsSortOrderType, required: false, default_value: nil
   end
-  def comments_connection(filter:)
+  def comments_connection(filter:, sort_order:)
     filter = filter.to_h
     all_comments, for_attempt = filter.values_at(:all_comments, :for_attempt)
 
@@ -148,6 +158,7 @@ module Interfaces::SubmissionInterface
         end
         scope = scope.where(attempt: target_attempt)
       end
+      scope = scope.reorder(created_at: sort_order) if sort_order
       scope
     end
   end
@@ -258,19 +269,24 @@ module Interfaces::SubmissionInterface
   def turnitin_data
     return nil if object.turnitin_data.empty?
 
-    promises = object.turnitin_data.except(:last_processed_attempt, :webhook_info).map do |asset_string, data|
+    promises = object.turnitin_data.except(:last_processed_attempt, :webhook_info, :eula_agreement_timestamp, :assignment_error, :provider, :student_error, :status).map do |asset_string, data|
       Loaders::AssetStringLoader.load(asset_string).then do |turnitin_context|
         next if turnitin_context.nil?
 
         {
           target: turnitin_context,
+          reportUrl: data[:report_url],
           score: data[:similarity_score],
-          status: data[:status]
+          status: data[:status],
+          state: data[:state]
         }
       end
     end
     Promise.all(promises).then(&:compact)
   end
+
+  field :originality_data, GraphQL::Types::JSON, null: true
+  delegate :originality_data, to: :submission
 
   field :submission_draft, Types::SubmissionDraftType, null: true
   def submission_draft
@@ -285,7 +301,7 @@ module Interfaces::SubmissionInterface
   end
 
   field :rubric_assessments_connection, Types::RubricAssessmentType.connection_type, null: true do
-    argument :filter, SubmissionRubricAssessmentFilterInputType, required: false, default_value: {}
+    argument :filter, Types::SubmissionRubricAssessmentFilterInputType, required: false, default_value: {}
   end
   def rubric_assessments_connection(filter:)
     filter = filter.to_h
@@ -323,4 +339,9 @@ module Interfaces::SubmissionInterface
   field :resource_link_lookup_uuid, String, null: true
 
   field :extra_attempts, Integer, null: true
+
+  field :assigned_assessments, [Types::AssessmentRequestType], null: true
+  def assigned_assessments
+    load_association(:assigned_assessments)
+  end
 end

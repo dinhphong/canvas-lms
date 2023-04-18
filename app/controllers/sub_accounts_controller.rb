@@ -49,10 +49,12 @@ class SubAccountsController < ApplicationController
   before_action :require_account_management, except: [:index]
 
   def index
-    # accept :manage_courses or :manage_account_settings so the course settings page can query subaccounts
-    return unless require_account_management(
-      permissions: %i[manage_account_settings manage_courses manage_courses_admin]
-    )
+    if !api_request? && params[:term]
+      # accept :manage_courses or :manage_courses_admin so course settings page can query subaccounts
+      require_account_management(permissions: [:manage_courses, :manage_courses_admin])
+    else
+      require_account_management
+    end
 
     @query = (params[:account] && params[:account][:name]) || params[:term]
     if @query
@@ -100,7 +102,7 @@ class SubAccountsController < ApplicationController
 
   def show
     @sub_account = subaccount_or_self(params[:id])
-    ActiveRecord::Associations::Preloader.new.preload(@sub_account, [{ sub_accounts: [:parent_account, :root_account] }])
+    ActiveRecord::Associations.preload(@sub_account, [{ sub_accounts: [:parent_account, :root_account] }])
     sub_account_json = @sub_account.as_json(only: [:id, :name], methods: [:course_count, :sub_account_count])
     sort_key = Account.best_unicode_collation_key("accounts.name")
     sub_accounts = @sub_account.sub_accounts.order(sort_key).as_json(only: [:id, :name], methods: [:course_count, :sub_account_count])

@@ -25,6 +25,10 @@
 
   hidden_text = t("Instructor has not posted this grade")
 %>
+<%
+  @visibility_feedback_enabled = Account.site_admin.feature_enabled?(:visibility_feedback_student_grades_page)
+  js_env visibility_feedback_enabled: @visibility_feedback_enabled
+%>
 <div id="grade-summary-content" style="display: none;">
   <% provide :right_side do %>
     <div id="student-grades-right-content" style="display: none;">
@@ -131,7 +135,9 @@
         <th scope="col"><%= t('headers.due', "Due") %></th>
         <th scope="col" class="status"><%= t('Status') %></th>
         <th scope="col" class="assignment_score"><%= t('headers.score', "Score") %></th>
-        <th scope="col" class="possible"><%= t('headers.out_of', "Out of") %></th>
+        <% if !@visibility_feedback_enabled %>
+          <th scope="col" class="possible"><%= t('headers.out_of', "Out of") %></th>
+        <% end %>
         <th scope="col"><span class="screenreader-only"><%= t('headers.details', "Details") %></span></th>
         <th scope="col"><span class="screenreader-only"><%= t('headers.submission_progress_status', "Submission Progress Status") %></span></th>
       </tr>
@@ -143,6 +149,7 @@
       %>
     <tr class="<%= assignment_presenter.classes %>"
         data-muted="<%= assignment_presenter.hide_grade_from_student? %>"
+        data-pending_quiz="<%= assignment_presenter.quiz_pending_review? %>"
         id="<%= "submission_" + assignment.id.to_s %>"
         <% if assignment_presenter.excused? %>
           <% excused_label = t "This assignment is excused and will not be considered in the total calculation" %>
@@ -152,12 +159,18 @@
         >
 
         <th class="title" scope="row">
-          <% if assignment_presenter.is_unread? %>
-            <div class="unread-grade">&nbsp;</div>
+          <% if !@visibility_feedback_enabled %>
+            <% if assignment_presenter.is_unread? %>
+              <div class="unread-grade">&nbsp;</div>
+            <% end %>
           <% end %>
           <% if assignment_presenter.show_submission_details? %>
-            <% if assignment.a2_enabled? && @presenter.student_is_user? %>
-              <a href="<%= context_url(@context, :context_assignment_url, assignment) %>"><%= assignment.title %></a>
+            <% if assignment.a2_enabled? %>
+              <% if @presenter.student_is_user? || @presenter.user_an_observer_of_student? %>
+                <a href="<%= context_url(@context, :context_assignment_url, assignment) %>"><%= assignment.title %></a>
+              <% else %>
+                <a href="<%= speed_grader_course_gradebook_url({course_id: assignment.context_id, assignment_id: assignment}.merge({student_id: submission.user_id})) %>"><%= assignment.title %></a>
+              <% end %>
             <% else %>
               <a href="<%= context_url(@context, :context_assignment_submission_url, assignment, @presenter.student_id) %>"><%= assignment.title %></a>
             <% end %>
@@ -179,6 +192,8 @@
             <span class="submission-missing-pill"></span>
           <% elsif assignment_presenter.late? %>
             <span class="submission-late-pill"></span>
+          <% elsif assignment_presenter.extended? %>
+            <span class="submission-extended-pill"></span>
           <% end %>
         </td>
 
@@ -228,6 +243,11 @@
                   <%= assignment_presenter.display_score %>
                 </span>
               <% end %>
+              <% if @visibility_feedback_enabled %>
+                <% if assignment_presenter.points_graded? && assignment.points_possible.present? %>
+                  <span>/ <%= n(round_if_whole(assignment.points_possible)) %></span>
+                <% end %>
+              <% end %>
             </span>
             <div style="display: none;">
               <!-- Store the original points so we don't need to parse and guess at locale -->
@@ -256,10 +276,12 @@
             </div>
           </div>
         </td>
-        <td class="possible points_possible">
-          <%= n(round_if_whole(assignment.points_possible)) %>
-        </td>
-        <td class="details">
+        <% if !@visibility_feedback_enabled %>
+          <td class="possible points_possible">
+            <%= n(round_if_whole(assignment.points_possible)) %>
+          </td>
+        <% end %>
+        <td class="details <%= @visibility_feedback_enabled && 'visibility_feedback_ff' %>">
           <% if !assignment.special_class %>
           <a href="#"
               class="toggle_final_grade_info tooltip"
@@ -277,27 +299,6 @@
               <span class="tooltip_text"><%= t("Grade Info") %></span>
             </span>
             <i class="icon-warning standalone-icon"></i>
-          </a>
-          <a href="#"
-            class="toggle_comments_link tooltip"
-            aria-label="<%= t('Read comments') %>"
-            aria-describedby="comment_count_for_assignment_<%= assignment.id %>"
-            <% if assignment_presenter.has_comments? && !assignment_presenter.hide_grade_from_student? %>
-              aria-expanded="false"
-              aria-controls="comments_thread_<%= assignment.id %>"
-              role="button"
-            <% else %>
-              aria-hidden='true'
-              role='presentation'
-              tabindex='-1'
-              style='visibility: hidden;'
-            <% end %>>
-            <span class="tooltip_wrap right">
-              <span class="tooltip_text" id="comment_count_for_assignment_<%= assignment.id %>">
-                <%= t("comment", count: submission&.visible_submission_comments&.size || 0) %>
-              </span>
-            </span>
-            <i class="icon-discussion standalone-icon"></i>
           </a>
           <a href="#"
             class="toggle_score_details_link tooltip"
@@ -328,6 +329,51 @@
               <span class="tooltip_text"><%= t("See rubric results") %></span>
             </span>
             <i class="icon-rubric"></i>
+            <% if @visibility_feedback_enabled %>
+              <% if assignment_presenter.item_unread?("rubric") %>
+                <div
+                  class="unread_rubric_dot"
+                  data-href="<%= api_v1_course_submission_mark_item_read_url(@context.id, assignment.id, submission.user.id, "rubric") %>">&nbsp;</div>
+              <% end %>
+            <% end %>
+          </a>
+          <a href="#"
+            id="assignment_comment_<%= assignment.id %>"
+            class="toggle_comments_link tooltip"
+            aria-label="<%= t('Read comments') %>"
+
+            aria-describedby="comment_count_for_assignment_<%= assignment.id %>"
+            <% if assignment_presenter.has_comments? && !assignment_presenter.hide_grade_from_student? %>
+              aria-expanded="false"
+              <% if !@visibility_feedback_enabled %>
+                aria-controls="comments_thread_<%= assignment.id %>"
+              <% end %>
+              role="button"
+            <% else %>
+              aria-hidden='true'
+              role='presentation'
+              tabindex='-1'
+              style='visibility: hidden;'
+            <% end %>>
+            <%
+              visible_comments_count = submission&.visible_submission_comments&.size
+            %>
+            <span class="tooltip_wrap right">
+              <span class="tooltip_text" id="comment_count_for_assignment_<%= assignment.id %>">
+                <%= t("comment", count: visible_comments_count || 0) %>
+              </span>
+            </span>
+            <i class="icon-discussion standalone-icon"></i>
+            <% if @visibility_feedback_enabled %>
+              <span class="comment_count">
+                <%= visible_comments_count || "" %>
+              </span>
+              <% if assignment_presenter.item_unread?("comment") %>
+                <div
+                  class="unread_comment_dot"
+                  data-href="<%= api_v1_course_submission_mark_item_read_url(@context.id, assignment.id, submission.user.id, "comment") %>">&nbsp;</div>
+              <% end %>
+            <% end %>
           </a>
           <% if assignment_presenter.show_submission_details? %>
             <% if @presenter.turnitin_enabled? || assignment_presenter.originality_report? || assignment_presenter.turnitin %>
@@ -461,18 +507,34 @@
                         <%= t(:disabled_for_student_view, "Test Student scores are not included in grade statistics.") %>
                       </td>
                     <% else %>
-                      <% high, low, mean = assignment_presenter.grade_distribution %>
+                      <% high, low, mean, median, low_q, high_q = assignment_presenter.grade_distribution %>
+                      <% show_advanced_statistics = assignment_presenter.show_advanced_statistics?(median) %>
                       <td>
                         <%= before_label(:mean, "Mean") %>
                         <%= n(round_if_whole(mean)) %>
+                        <% if show_advanced_statistics %>
+                          <br/>
+                          <%= before_label(:median, "Median") %>
+                          <%= n(round_if_whole(median)) %>
+                        <% end %>
                       </td>
                       <td>
                         <%= before_label(:high, "High") %>
                         <%= n(round_if_whole(high)) %>
+                        <% if show_advanced_statistics %>
+                          <br/>
+                          <%= before_label(:high_q, "Upper Quartile") %>
+                          <%= n(round_if_whole(high_q)) %>
+                        <% end %>
                       </td>
                       <td>
                         <%= before_label(:low, "Low") %>
                         <%= n(round_if_whole(low)) %>
+                        <% if show_advanced_statistics %>
+                          <br/>
+                          <%= before_label(:low_q, "Lower Quartile") %>
+                          <%= n(round_if_whole(low_q)) %>
+                        <% end %>
                       </td>
                       <% if assignment_presenter.deduction_present? %>
                         <td>
@@ -488,19 +550,25 @@
                       <% end %>
                       <td colspan="<%= assignment_presenter.deduction_present? ? 1 : 3 %>">
                         <% graph = assignment_presenter.graph %>
-                        <div style="cursor: pointer; float: <%= direction('right') %>; height: 30px; margin-<%= direction('left') %>: 20px; width: 160px; position: relative; margin-<%= direction('right') %>: 30px;" aria-hidden="true" title="<%= graph.title %>">
-                          <div class="grade-summary-graph-component" style="height: 10px; margin: 5px 0px; border-width: 2px; border-<%= direction('right') %>-width: 0;">&nbsp;</div>
-                          <div class="grade-summary-graph-component" style="width: <%= graph.low_width %>px; height: 0px; margin-top: 10px; border-bottom-width: 2px;">&nbsp;</div>
-                          <div class="grade-summary-graph-component" style="left: <%= graph.high_left %>px; width: <%= graph.high_width %>px; height: 0px; margin-top: 10px; border-bottom-width: 2px;">&nbsp;</div>
-                          <div class="grade-summary-graph-component" style="left: <%= graph.low_width %>px; width: <%= graph.mean_low_width %>px; height: 20px; border-width: 2px; border-top-left-radius: 3px; border-bottom-left-radius: 3px; border-<%= direction('right') %>-width: 0; background: #fff;">&nbsp;</div>
-                          <div class="grade-summary-graph-component" style="left: <%= graph.mean_left%>px; width: <%= graph.mean_high_width%>px; height: 20px; border-width: 2px; border-top-right-radius: 3px; border-bottom-right-radius: 3px; background: #fff;">&nbsp;</div>
-                          <div class="grade-summary-graph-component" style="left: <%= graph.max_left %>px; height: 10px; margin: 5px 0px; border-width: 2px; border-<%= direction('left') %>-width: 0;">&nbsp;</div>
+                        <svg viewBox="-1 0 160 30" xmlns="http://www.w3.org/2000/svg" style="cursor: pointer; float: <%= direction('right') %>; height: 30px; margin-<%= direction('left') %>: 20px; width: 161px; position: relative; margin-<%= direction('right') %>: 30px;" aria-hidden="true">
+                          <title><%= graph.title %></title>
+                          <line class="zero" x1="0" y1="3" x2="0" y2="27" stroke="#556572" />
+                          <line class="possible" x1="<%= graph.max_pos %>" y1="3" x2="<%= graph.max_pos %>" y2="27" stroke="#556572" />
+                          
+                          <line class="min" x1="<%= graph.low_pos %>" y1="6" x2="<%= graph.low_pos %>" y2="24" stroke="#556572" stroke-width="2" />
+                          <line class="bottomQ" x1="<%= graph.low_pos %>" y1="15" x2="<%= graph.lq_pos %>" y2="15" stroke="#556572" stroke-width="2" />
+                          <line class="topQ" x1="<%= graph.uq_pos %>" y1="15" x2="<%= graph.high_pos %>" y2="15" stroke="#556572" stroke-width="2" />
+                          <line class="max" x1="<%= graph.high_pos %>" y1="6" x2="<%= graph.high_pos %>" y2="24" stroke="#556572" stroke-width="2" />
+
+                          <rect class="mid50" x="<%= graph.lq_pos %>" y="3" width="<%= graph.uq_pos - graph.lq_pos %>" height="24" stroke="#556572" stroke-width="2" rx="3" fill="none" />
+                          <line class="median" x1="<%= graph.median_pos %>" y1="3" x2="<%= graph.median_pos %>" y2="27" stroke="#556572" stroke-width="2" />
+                          
                           <% if submission && submission.score %>
-                            <div class="grade-summary-graph-component" style="top: 5px; height: 10px; width: 10px; left: <%= graph.score_left %>px; border: 2px solid #248; background: #abd; border-radius: 3px;" title="<%= before_label(:your_score, "Your Score") %>
-                              <%= t(:submission_score, "*%{score}* out of %{possible}", :wrapper => '\1', :score => n(submission.score), :possible => n(round_if_whole(assignment.points_possible))) %>">&nbsp;
-                            </div>
+                          <rect class="myScore" x="<%= graph.score_pos - 7 %>" y="8" width="14" height="14" stroke="#224488" stroke-width="2" rx="3" fill="#aabbdd">
+                            <title><%= before_label(:your_score, "Your Score") %> <%= t(:submission_score, "*%{score}* out of %{possible}", :wrapper => '\1', :score => n(submission.score), :possible => n(round_if_whole(assignment.points_possible))) %></title>
+                          </rect>
                           <% end %>
-                        </div>
+                        </svg>
                       </td>
                     <% end %>
                   </tr>
@@ -587,6 +655,7 @@
       </tr>
     <% end %>
   </table>
+  <div id="GradeSummarySubmissionCommentsTray"></div>
   </div>
   <% if @presenter.hidden_submissions_for_published_assignments? %>
     <small><i class="icon-off" role="presentation"></i><%= t("Your instructor has not posted the grade. While your instructor has not posted the grade, grade and comment information is unavailable.") %></small>
@@ -596,4 +665,5 @@
   <input type="text" style="width: 40px; display: none;" id="grade_entry" title="<%= t('titles.enter_score', "Enter a score to test") %>"/>
   <a href="#" id="revert_score_template" class="revert_score_link" title="<%= t('titles.revert_score', "Revert to original score") %>"><i class="icon-reply-2"></i></a>
   <a href="<%= context_url(@context, :context_assignment_submission_url, "{{ assignment_id }}", @presenter.student_id) %>" class="update_submission_url" style="display: none;">&nbsp;</a>
+  <% mark_grades_read_a2 %>
 </div>

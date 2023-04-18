@@ -37,7 +37,14 @@ module GradebooksHelper
     end
   end
 
-  def ungraded_submission_icon_attributes_for(submission_type)
+  def ungraded_submission_icon_attributes_for(submission_type, is_new_quizzes: false)
+    if is_new_quizzes
+      return {
+        icon_class: "icon-quiz icon-Solid",
+        screenreader_text: I18n.t("New Quizzes Submission")
+      }
+    end
+
     case submission_type
     when "online_url"
       {
@@ -121,7 +128,10 @@ module GradebooksHelper
     elsif submission && grade && submission.workflow_state != "pending_review"
       graded_submission_display(grade, score, submission.assignment.grading_type)
     elsif submission.submission_type
-      ungraded_submission_display(submission.submission_type)
+      ungraded_submission_display(
+        submission.submission_type,
+        is_new_quizzes: submission.cached_quiz_lti
+      )
     else
       "-"
     end
@@ -144,8 +154,8 @@ module GradebooksHelper
     end
   end
 
-  def ungraded_submission_display(submission_type)
-    sub_score = ungraded_submission_icon_attributes_for(submission_type)
+  def ungraded_submission_display(submission_type, is_new_quizzes: false)
+    sub_score = ungraded_submission_icon_attributes_for(submission_type, is_new_quizzes: is_new_quizzes)
     if sub_score
       screenreadable_icon(sub_score, %w[submission_icon])
     else
@@ -169,12 +179,12 @@ module GradebooksHelper
   end
 
   def translated_due_date_for_speedgrader(assignment)
-    return t("Due: Multiple Due Dates") if assignment.multiple_due_dates_apply_to?(@current_user)
+    return I18n.t("Due: Multiple Due Dates") if assignment.multiple_due_dates_apply_to?(@current_user)
 
     assignment = assignment.overridden_for(@current_user)
 
     if assignment.due_at
-      return t("Due: %{assignment_due_date_time}", assignment_due_date_time: datetime_string(force_zone(assignment.due_at)))
+      return I18n.t("Due: %{assignment_due_date_time}", assignment_due_date_time: datetime_string(force_zone(assignment.due_at)))
     end
 
     override_dates = if assignment.only_visible_to_overrides?
@@ -184,9 +194,9 @@ module GradebooksHelper
                      end
 
     if override_dates.count == 1
-      t("Due: %{assignment_due_date_time}", assignment_due_date_time: datetime_string(force_zone(override_dates.first)))
+      I18n.t("Due: %{assignment_due_date_time}", assignment_due_date_time: datetime_string(force_zone(override_dates.first)))
     else
-      t("Due: No Due Date")
+      I18n.t("Due: No Due Date")
     end
   end
 

@@ -42,6 +42,7 @@ class ConversationMessage < ActiveRecord::Base
 
   before_create :set_root_account_ids
   after_create :generate_user_note!
+  after_create :log_conversation_message_metrics
   after_save :update_attachment_associations
 
   scope :human, -> { where("NOT generated") }
@@ -190,7 +191,7 @@ class ConversationMessage < ActiveRecord::Base
     return [] unless conversation
 
     subscribed = subscribed_participants.reject { |u| u.id == author_id }.map { |x| x.becomes(User) }
-    ActiveRecord::Associations::Preloader.new.preload(conversation_message_participants, :user)
+    ActiveRecord::Associations.preload(conversation_message_participants, :user)
     participants = conversation_message_participants.map(&:user)
     subscribed & participants
   end
@@ -248,8 +249,13 @@ class ConversationMessage < ActiveRecord::Base
                 t(:subject, "Private message")
               end
       note = format_message(body).first
-      recipient.user_notes.create(creator: author, title: title, note: note, root_account_id: root_account_id)
+      recipient.user_notes.create(creator: author, title: title, note: note, root_account_id: Shard.relative_id_for(root_account_id, context.shard, recipient.shard))
     end
+  end
+
+  def log_conversation_message_metrics
+    stat = (context || Account.site_admin).root_account.feature_enabled?(:react_inbox) ? "inbox.message.created.react" : "inbox.message.created.legacy"
+    InstStatsd::Statsd.increment(stat)
   end
 
   attr_accessor :cc_author

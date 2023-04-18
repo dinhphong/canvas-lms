@@ -53,6 +53,10 @@ class GradeSummaryAssignmentPresenter
     (submission.present? ? @summary.unread_submission_ids.include?(submission.id) : false)
   end
 
+  def item_unread?(item)
+    submission.present? && !!@summary.unread_submission_items[submission.id]&.include?(item)
+  end
+
   def hide_grade_from_student?
     submission.blank? || submission.hide_grade_from_student?
   end
@@ -71,6 +75,10 @@ class GradeSummaryAssignmentPresenter
     assignment.grading_type == "gpa_scale"
   end
 
+  def points_graded?
+    assignment.grading_type == "points"
+  end
+
   def is_letter_graded_or_gpa_scaled?
     is_letter_graded? || is_gpa_scaled?
   end
@@ -85,6 +93,10 @@ class GradeSummaryAssignmentPresenter
 
   def has_no_score_display?
     hide_grade_from_student? || submission.nil?
+  end
+
+  def quiz_pending_review?
+    submission&.submission_type == "online_quiz" && submission&.workflow_state == "pending_review"
   end
 
   def original_points
@@ -140,6 +152,7 @@ class GradeSummaryAssignmentPresenter
     classes << "assignment_graded" if graded?
     classes << special_class
     classes << "excused" if excused?
+    classes << "extended" if extended?
     classes.join(" ")
   end
 
@@ -153,6 +166,10 @@ class GradeSummaryAssignmentPresenter
 
   def excused?
     submission.try(:excused?)
+  end
+
+  def extended?
+    submission.try(:extended?)
   end
 
   def deduction_present?
@@ -216,16 +233,32 @@ class GradeSummaryAssignmentPresenter
 
   def grade_distribution
     @grade_distribution ||= if (stats = @summary.assignment_stats[assignment.id])
-                              [stats.maximum, stats.minimum, stats.mean].map { |stat| stat.to_f.round(2) }
+                              [stats.maximum, stats.minimum, stats.mean, stats.median, stats.lower_q, stats.upper_q].map { |stat| stat&.to_f&.round(2) }
                             end
   end
 
   def graph
     @graph ||= begin
-      high, low, mean = grade_distribution
+      high, low, mean, median, lower_q, upper_q = grade_distribution
       score = submission&.score
-      GradeSummaryGraph.new(high, low, mean, assignment.points_possible, score)
+      # Just render the old-style fake box-and whiskers plot (box edges are high and low with middle at mean)
+      # if flag off or we don't have the new statistics
+      GradeSummaryGraph.new(
+        high: high,
+        low: low,
+        lower_q: lower_q,
+        upper_q: upper_q,
+        median: median,
+        mean: mean,
+        points_possible: assignment.points_possible,
+        score: score,
+        legacy: !show_advanced_statistics?(median)
+      )
     end
+  end
+
+  def show_advanced_statistics?(median)
+    Account.site_admin.feature_enabled?(:enhanced_grade_statistics) && !median.nil?
   end
 
   def file
@@ -255,60 +288,55 @@ class GradeSummaryAssignmentPresenter
   def viewing_fake_student?
     @summary.student_enrollment.fake_student?
   end
-end
 
-class GradeSummaryGraph
   FULLWIDTH = 150.0
+  GradeSummaryGraph = Struct.new(:high, :low, :lower_q, :upper_q, :median, :mean, :points_possible, :score, :legacy, keyword_init: true) do
+    def low_pos
+      pixels_for(legacy ? 0 : low)
+    end
 
-  def initialize(high, low, mean, points_possible, score)
-    @high = high.to_f
-    @mean = mean.to_f
-    @low = low.to_f
-    @points_possible = points_possible.to_f
-    @score = score
-  end
+    def lq_pos
+      pixels_for(legacy ? low : lower_q)
+    end
 
-  def low_width
-    pixels_for(@low)
-  end
+    def uq_pos
+      pixels_for(legacy ? high : upper_q)
+    end
 
-  def high_left
-    pixels_for(@high)
-  end
+    def median_pos
+      pixels_for(legacy ? mean : median)
+    end
 
-  def high_width
-    pixels_for(@points_possible - @high)
-  end
+    def high_pos
+      pixels_for(legacy ? points_possible : high)
+    end
 
-  def mean_left
-    pixels_for(@mean)
-  end
+    def max_pos
+      FULLWIDTH
+    end
 
-  def mean_low_width
-    pixels_for(@mean - @low)
-  end
+    def score_pos
+      pixels_for(score)
+    end
 
-  def mean_high_width
-    pixels_for(@high - @mean)
-  end
+    def title
+      if legacy
+        I18n.t("#grade_summary.graph_title", "Mean %{mean}, High %{high}, Low %{low}",
+               {
+                 mean: I18n.n(mean), high: I18n.n(high), low: I18n.n(low)
+               })
+      else
+        I18n.t("Median %{median}, High %{high}, Low %{low}",
+               {
+                 median: I18n.n(median), high: I18n.n(high), low: I18n.n(low)
+               })
+      end
+    end
 
-  def max_left
-    [FULLWIDTH.round, (pixels_for(@high) + 3)].max
-  end
+    private
 
-  def score_left
-    pixels_for(@score) - 5
-  end
-
-  def title
-    I18n.t("#grade_summary.graph_title", "Mean %{mean}, High %{high}, Low %{low}", {
-             mean: I18n.n(@mean), high: I18n.n(@high), low: I18n.n(@low)
-           })
-  end
-
-  private
-
-  def pixels_for(value)
-    (value.to_f / @points_possible * FULLWIDTH).round
+    def pixels_for(value)
+      (value.to_f / points_possible * FULLWIDTH)
+    end
   end
 end

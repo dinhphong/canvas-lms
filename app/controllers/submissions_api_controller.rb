@@ -148,7 +148,7 @@
 #           "type": "boolean"
 #         },
 #         "late_policy_status": {
-#           "description": "The status of the submission in relation to the late policy. Can be late, missing, none, or null.",
+#           "description": "The status of the submission in relation to the late policy. Can be late, missing, extended, none, or null.",
 #           "example": "missing",
 #           "type": "string"
 #         },
@@ -200,6 +200,11 @@
 #               "unread"
 #             ]
 #           }
+#         },
+#         "redo_request" : {
+#           "description": "This indicates whether the submission has been reassigned by the instructor.",
+#           "example": "true",
+#           "type": "boolean"
 #         }
 #       }
 #     }
@@ -210,8 +215,9 @@ class SubmissionsApiController < ApplicationController
   before_action :ensure_submission, only: %i[show
                                              document_annotations_read_state
                                              mark_document_annotations_read
-                                             rubric_comments_read_state
-                                             mark_rubric_comments_read]
+                                             rubric_assessments_read_state
+                                             mark_rubric_assessments_read
+                                             mark_submission_item_read]
   include Api::V1::Progress
   include Api::V1::Submission
   include Submissions::ShowHelper
@@ -237,6 +243,7 @@ class SubmissionsApiController < ApplicationController
   # @response_field grade The grade for the submission, translated into the assignment grading scheme (so a letter grade, for example).
   # @response_field grade_matches_current_submission A boolean flag which is false if the student has re-submitted since the submission was last graded.
   # @response_field preview_url Link to the URL in canvas where the submission can be previewed. This will require the user to log in.
+  # @response_field redo_request If the submission was reassigned
   # @response_field url If the submission was made as a URL.
   # @response_field late Whether the submission was made after the applicable due date.
   # @response_field assignment_visible Whether this assignment is visible to the user who submitted the assignment.
@@ -560,8 +567,8 @@ class SubmissionsApiController < ApplicationController
         result << hash
       end
     else
-      order_by = params[:order] == "graded_at" ? "graded_at" : :id
-      order_direction = params[:order_direction] == "descending" ? "desc nulls last" : "asc"
+      order_by = (params[:order] == "graded_at") ? "graded_at" : :id
+      order_direction = (params[:order_direction] == "descending") ? "desc nulls last" : "asc"
       order = "#{order_by} #{order_direction}"
       submissions = @context.submissions.except(:order).where(user_id: student_ids).order(order)
       submissions = submissions.where(assignment_id: assignments)
@@ -704,6 +711,9 @@ class SubmissionsApiController < ApplicationController
   # @argument comment[text_comment] [String]
   #   Add a textual comment to the submission.
   #
+  # @argument comment[attempt] [Integer]
+  #   The attempt number (starts at 1) to associate the comment with.
+  #
   # @argument comment[group_comment] [Boolean]
   #   Whether or not this comment should be sent to the entire group (defaults
   #   to false). Ignored if this is not a group assignment or if no text_comment
@@ -761,7 +771,8 @@ class SubmissionsApiController < ApplicationController
   #   Sets the "excused" status of an assignment.
   #
   # @argument submission[late_policy_status] [String]
-  #   Sets the late policy status to either "late", "missing", "none", or null.
+  #   Sets the late policy status to either "late", "missing", "extended", "none", or null.
+  #     NB: "extended" values can only be set in the UI when the "UI features for 'extended' Submissions" Account Feature is on
   #
   # @argument submission[seconds_late_override] [Integer]
   #   Sets the seconds late if late policy status is "late"
@@ -906,8 +917,9 @@ class SubmissionsApiController < ApplicationController
       if comment.is_a?(ActionController::Parameters)
         admin_in_context = !@context_enrollment || @context_enrollment.admin?
         comment = {
-          comment: comment[:text_comment],
+          attempt: comment[:attempt],
           author: @current_user,
+          comment: comment[:text_comment],
           hidden: @submission.hide_grade_from_student? && admin_in_context
         }.merge(
           comment.permit(:media_comment_id, :media_comment_type, :group_comment).to_unsafe_h
@@ -1038,7 +1050,8 @@ class SubmissionsApiController < ApplicationController
   #   Sets the "excused" status of an assignment.
   #
   # @argument submission[late_policy_status] [String]
-  #   Sets the late policy status to either "late", "missing", "none", or null.
+  #   Sets the late policy status to either "late", "missing", "extended", "none", or null.
+  #     NB: "extended" values can only be set in the UI when the "UI features for 'extended' Submissions" Account Feature is on
   #
   # @argument submission[seconds_late_override] [Integer]
   #   Sets the seconds late if late policy status is "late"
@@ -1128,7 +1141,7 @@ class SubmissionsApiController < ApplicationController
       end
       submissions = Api.paginate(submission_scope, self, api_v1_course_assignment_gradeable_students_url(@context, @assignment))
       render json: submissions.map { |submission|
-        json = can_view_student_names ? user_display_json(submission.user, @context) : anonymous_user_display_json(submission.anonymous_id)
+        json = can_view_student_names ? user_display_json(submission.user, @context) : anonymous_user_display_json(submission, @assignment)
         if include_pg
           selection = submission.provisional_grades.find(&:selection)
           json[:in_moderation_set] = selection.present?
@@ -1241,9 +1254,9 @@ class SubmissionsApiController < ApplicationController
   #
   # @returns Progress
   def bulk_update
-    grade_data = params[:grade_data].to_unsafe_h
+    grade_data = params[:grade_data]&.to_unsafe_h
     unless grade_data.is_a?(Hash) && grade_data.present?
-      return render json: "'grade_data' parameter required", status: :bad_request
+      return render json: { error: "'grade_data' parameter required" }, status: :bad_request
     end
 
     # singular case doesn't require the user to pass an assignment_id in
@@ -1304,13 +1317,39 @@ class SubmissionsApiController < ApplicationController
     change_topic_read_state("unread")
   end
 
-  # @API Get rubric comments read state
+  # @API Mark submission item as read
   #
-  # Return whether new rubric comments made on a submission have been seen by the student being assessed.
+  # No request fields are necessary.
+  #
+  # A submission item can be "grade", "comment" or "rubric"
+  #
+  # On success, the response will be 204 No Content with an empty body.
+  #
+  # @example_request
+  #
+  #   curl 'https://<canvas>/api/v1/courses/<course_id>/assignments/<assignment_id>/submissions/<user_id>/read/<item>.json' \
+  #        -X PUT \
+  #        -H "Authorization: Bearer <token>" \
+  #        -H "Content-Length: 0"
+  #
+  def mark_submission_item_read
+    if authorized_action(@submission, @current_user, :mark_item_read)
+      render_state_change_result @submission.mark_item_read(params[:item])
+    end
+  end
+
+  # @API Get rubric assessments read state
+  #
+  # Return whether new rubric comments/grading made on a submission have been seen by the student being assessed.
   #
   # @example_request
   #
   #   curl 'https://<canvas>/api/v1/courses/<course_id>/assignments/<assignment_id>/submissions/<user_id>/rubric_comments/read' \
+  #        -H "Authorization: Bearer <token>"
+  #
+  #   # or
+  #
+  #   curl 'https://<canvas>/api/v1/courses/<course_id>/assignments/<assignment_id>/submissions/<user_id>/rubric_assessments/read' \
   #        -H "Authorization: Bearer <token>"
   #
   # @example_response
@@ -1318,22 +1357,29 @@ class SubmissionsApiController < ApplicationController
   #     "read": false
   #   }
   #
-  def rubric_comments_read_state
+  def rubric_assessments_read_state
     if authorized_action(@submission, @current_user, :read)
-      render json: { read: !@user.unread_rubric_comments?(@submission) }
+      render json: { read: !@user.unread_rubric_assessments?(@submission) }
     end
   end
 
-  # @API Mark rubric comments as read
+  # @API Mark rubric assessments as read
   #
-  # Indicate that rubric comments made on a submission have been read by the student being assessed.
+  # Indicate that rubric comments/grading made on a submission have been read by the student being assessed.
   # Only the student who owns the submission can use this endpoint.
   #
-  # NOTE: Rubric comments will be marked as read automatically when they are viewed in Canvas web.
+  # NOTE: Rubric assessments will be marked as read automatically when they are viewed in Canvas web.
   #
   # @example_request
   #
   #   curl 'https://<canvas>/api/v1/courses/<course_id>/assignments/<assignment_id>/submissions/<user_id>/rubric_comments/read' \
+  #        -X PUT \
+  #        -H "Authorization: Bearer <token>" \
+  #        -H "Content-Length: 0"
+  #
+  #   # or
+  #
+  #   curl 'https://<canvas>/api/v1/courses/<course_id>/assignments/<assignment_id>/submissions/<user_id>/rubric_assessments/read' \
   #        -X PUT \
   #        -H "Authorization: Bearer <token>" \
   #        -H "Content-Length: 0"
@@ -1343,10 +1389,10 @@ class SubmissionsApiController < ApplicationController
   #     "read": true
   #   }
   #
-  def mark_rubric_comments_read
+  def mark_rubric_assessments_read
     return render_unauthorized_action unless @user == @current_user
 
-    @user.mark_rubric_comments_read!(@submission)
+    @user.mark_rubric_assessments_read!(@submission)
     render json: { read: true }
   end
 
@@ -1479,8 +1525,8 @@ class SubmissionsApiController < ApplicationController
   def bulk_load_attachments_and_previews(submissions)
     Submission.bulk_load_versioned_attachments(submissions)
     attachments = submissions.flat_map(&:versioned_attachments)
-    ActiveRecord::Associations::Preloader.new.preload(attachments,
-                                                      [:canvadoc, :crocodoc_document])
+    ActiveRecord::Associations.preload(attachments,
+                                       [:canvadoc, :crocodoc_document])
     Version.preload_version_number(submissions)
   end
 

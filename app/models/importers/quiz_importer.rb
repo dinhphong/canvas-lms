@@ -249,7 +249,7 @@ module Importers
         hash[:assignment_overrides].each do |o|
           next if o[:set_id].to_i == AssignmentOverride::NOOP_MASTERY_PATHS &&
                   o[:set_type] == AssignmentOverride::SET_TYPE_NOOP &&
-                  !context.feature_enabled?(:conditional_release)
+                  !context.conditional_release?
 
           override = item.assignment_overrides.where(o.slice(:set_type, :set_id)).first
           override ||= item.assignment_overrides.build
@@ -276,6 +276,13 @@ module Importers
       end
 
       item.generate_quiz_data if hash[:available] || item.published?
+
+      if hash.key?(:points_possible) && migration.quizzes_next_migration?
+        item.points_possible = hash[:points_possible]
+
+        # prevent overriding the points_possible field
+        item.saved_by_new_quizzes_migration = true
+      end
 
       if hash[:available]
         item.workflow_state = "available"

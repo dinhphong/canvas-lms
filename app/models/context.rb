@@ -265,6 +265,9 @@ module Context
       file_id = params[:file_id] || params[:id]
       file_id ||= uri.query && CGI.parse(uri.query).send(:[], "preview")&.first
       object ||= context.attachments.find_by(id: file_id) # attachments.find_by(id:) uses the replacement hackery
+      full_path = params[:full_path]
+      folder = full_path && Folder.find_by(name: full_path)
+      object ||= folder if folder && folder.context == context
     when "wiki_pages"
       object = context.wiki.find_page(CGI.unescape(params[:id]), include_deleted: true)
       if !object && params[:id].to_s.include?("+") # maybe it really is a "+"
@@ -272,8 +275,17 @@ module Context
       end
     when "external_tools"
       if params[:action] == "retrieve"
-        tool_url = CGI.parse(uri.query)["url"].first rescue nil
-        object = ContextExternalTool.find_external_tool(tool_url, context) if tool_url
+        query_params = CGI.parse(uri.query)
+        tool_url = query_params["url"]&.first
+        resource_link_lookup_uuid = query_params["resource_link_lookup_uuid"]&.first
+        object = if tool_url
+                   ContextExternalTool.find_external_tool(tool_url, context)
+                 elsif resource_link_lookup_uuid
+                   Lti::ResourceLink.where(
+                     lookup_uuid: resource_link_lookup_uuid,
+                     context: context
+                   ).active.take&.current_external_tool(context)
+                 end
       elsif params[:id]
         object = ContextExternalTool.find_external_tool_by_id(params[:id], context)
       end
@@ -300,6 +312,7 @@ module Context
     name ||= asset.title.presence if asset.respond_to?(:title)
     name ||= asset.short_description.presence if asset.respond_to?(:short_description)
     name ||= asset.name if asset.respond_to?(:name)
+    name ||= asset.asset_name if asset.respond_to?(:asset_name)
     name || ""
   end
 

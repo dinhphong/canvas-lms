@@ -267,7 +267,7 @@ class ContextModuleItemsApiController < ApplicationController
   def index
     if authorized_action(@context, @current_user, :read)
       mod = @context.modules_visible_to(@student || @current_user).find(params[:module_id])
-      ActiveRecord::Associations::Preloader.new.preload(mod, content_tags: :content)
+      ActiveRecord::Associations.preload(mod, content_tags: :content)
       route = polymorphic_url([:api_v1, @context, mod, :items])
       scope = mod.content_tags_visible_to(@student || @current_user)
       scope = ContentTag.search_by_attribute(scope, :title, params[:search_term])
@@ -732,6 +732,7 @@ class ContextModuleItemsApiController < ApplicationController
           published: new_tag.published?,
           publishable_id: module_item_publishable_id(new_tag),
           unpublishable: module_item_unpublishable?(new_tag),
+          publish_at: module_item_publish_at(new_tag),
           graded: new_tag.graded?,
           content_details: content_details(new_tag, @current_user),
           assignment_id: new_tag.assignment.try(:id),

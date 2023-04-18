@@ -29,6 +29,7 @@
   @show_embedded_chat = false
   add_body_class 'ic-no-flex-layout full-width'
   @can_edit_anything = !@context.completed?
+  @emojis_enabled = @context.feature_enabled?(:submission_comment_emojis)
 %>
 
 <% provide :page_title, t(:page_title, "%{assignment_name}, SpeedGrader, %{course_name}", :assignment_name => @assignment.title, :course_name => @context.name) %>
@@ -157,22 +158,16 @@
       <div class=right_side_content>
         <div id="rightside_inner" class="full_height">
           <div class="secondary_mount_point_container">
-            <% if Account.site_admin.feature_enabled?(:edit_submission_status_from_speedgrader) %>
-              <div id="speed_grader_edit_status_secondary_mount_point"></div>
-            <% end %>
+            <div id="speed_grader_edit_status_secondary_mount_point"></div>
           </div>
           <div id="submission_details" class="content_box">
             <div style="display: flex;">
               <div id="multiple_submissions" style="display:flex; flex: 1"></div>
-              <% if Account.site_admin.feature_enabled?(:edit_submission_status_from_speedgrader) %>
-                <div id="speed_grader_edit_status_mount_point"></div>
-              <% end %>
+              <div id="speed_grader_edit_status_mount_point"></div>
             </div>
             <div id="submission_not_newest_notice" title='<%= t('titles.not_newest', "use the dropdown above to change which submission to look at") %>'><%= t(:not_newest_notice, "Note: This is not the most recent submission") %></div>
             <div id="submission_attachment_viewed_at_container"></div>
-            <% if Account.site_admin.feature_enabled?(:word_count_in_speed_grader) %>
-              <div id="submission_word_count"></div>
-            <% end %>
+            <div id="submission_word_count"></div>
             <div id="submission_files_container">
               <label><%= t("Submitted Files") %>: <span class="labelText--not-bold"><%= t("(click to load)") %></span>&nbsp;</label>
               <div id="submission_files_list">
@@ -229,6 +224,7 @@
             <% end %>
 
             <% if  @assignment.active_rubric_association? || can_do(@context, @current_user, :manage_grades) || (@context.concluded? && can_do(@context, @current_user, :read_as_admin)) %>
+            <div id="grades-loading-spinner"></div>
             <div id="grading">
               <h2 class="gradebookHeader--rightside"><%= t('headers.assessment', "Assessment") %></h2>
               <% if can_do(@context, @current_user, :manage_grades) || (@context.concluded? && can_do(@context, @current_user, :read_as_admin)) %>
@@ -338,28 +334,31 @@
                   </a>
                 </div>
                 <div class="ic-Action-header">
-                  <div class="ic-Action-header__Primary attach_things" role="group">
-                    <button class="Button Button--small" id="add_attachment" title="<%= t("File Attachment") %>" type="button">
-                      <i class="icon-paperclip" aria-hidden="true"></i>
-                      <span class="screenreader-only">
-                        <%= t("File Attachment") %>
-                      </span>
-                    </button>
-                    <% if feature_enabled?(:kaltura) %>
-                      <button id="media_comment_button" class="Button Button--small media_comment_link" title="<%= t("Media Comment") %> " type="button">
-                        <i class="icon-media" aria-hidden="true"></i>
+                  <div id="emojis-attachments-container">
+                    <span id="emoji-quick-picker-container"></span>
+                    <div class="ic-Action-header__Primary attach_things<%= @emojis_enabled ? " emojis" : "" %>" role="group">
+                      <button class="Button Button--small" id="add_attachment" title="<%= t("File Attachment") %>" type="button">
+                        <i class="icon-paperclip" aria-hidden="true"></i>
                         <span class="screenreader-only">
-                          <%= t("Media Comment") %>
+                          <%= t("File Attachment") %>
                         </span>
                       </button>
-                    <% end %>
-                    <div class="speech-recognition" style="display:none">
-                      <a id="speech_recognition_button" title="<%= t("Speech Recognition") %>" href="#" class="Button Button--small speech_recognition_link">
-                        <i class="icon-audio"></i>
-                        <span class="screenreader-only">
-                          <%= t("Speech Recognition") %>
-                        </span>
-                      </a>
+                      <% if feature_enabled?(:kaltura) %>
+                        <button id="media_comment_button" class="Button Button--small media_comment_link" title="<%= t("Media Comment") %> " type="button">
+                          <i class="icon-media" aria-hidden="true"></i>
+                          <span class="screenreader-only">
+                            <%= t("Media Comment") %>
+                          </span>
+                        </button>
+                      <% end %>
+                      <div class="speech-recognition" style="display:none">
+                        <a id="speech_recognition_button" title="<%= t("Speech Recognition") %>" href="#" class="Button Button--small speech_recognition_link">
+                          <i class="icon-audio"></i>
+                          <span class="screenreader-only">
+                            <%= t("Speech Recognition") %>
+                          </span>
+                        </a>
+                      </div>
                     </div>
                   </div>
                   <div class="ic-Action-header__Secondary">

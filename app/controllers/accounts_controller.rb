@@ -293,7 +293,7 @@ require "csv"
 #     }
 
 class AccountsController < ApplicationController
-  before_action :require_user, only: %i[index help_links manually_created_courses_account]
+  before_action :require_user, only: %i[index help_links manually_created_courses_account account_calendar_settings]
   before_action :reject_student_view_student
   before_action :get_context
   before_action :rce_js_env, only: [:settings]
@@ -302,6 +302,7 @@ class AccountsController < ApplicationController
   include Api::V1::Account
   include CustomSidebarLinksHelper
   include SupportHelpers::ControllerHelpers
+  include DefaultDueTimeHelper
 
   INTEGER_REGEX = /\A[+-]?\d+\z/.freeze
   SIS_ASSINGMENT_NAME_LENGTH_DEFAULT = 255
@@ -330,7 +331,7 @@ class AccountsController < ApplicationController
                     else
                       []
                     end
-        ActiveRecord::Associations::Preloader.new.preload(@accounts, :root_account)
+        ActiveRecord::Associations.preload(@accounts, :root_account)
 
         # originally had 'includes' instead of 'include' like other endpoints
         includes = params[:include] || params[:includes]
@@ -376,7 +377,7 @@ class AccountsController < ApplicationController
     else
       @accounts = []
     end
-    ActiveRecord::Associations::Preloader.new.preload(@accounts, :root_account)
+    ActiveRecord::Associations.preload(@accounts, :root_account)
     render json: @accounts.map { |a| account_json(a, @current_user, session, params[:includes] || [], true) }
   end
 
@@ -409,7 +410,7 @@ class AccountsController < ApplicationController
   #       -H 'Authorization: Bearer <token>'
   #
   # @example_response
-  #   {"usage_rights_required": true, "lock_all_announcements": true, "restrict_student_past_view": true}
+  #   {"microsoft_sync_enabled": true, "microsoft_sync_login_attribute_suffix": false}
   def show_settings
     return render_unauthorized_action unless @account.grants_right?(@current_user, session, :manage_account_settings)
 
@@ -482,7 +483,7 @@ class AccountsController < ApplicationController
     @accounts = Api.paginate(@accounts, self, api_v1_sub_accounts_url,
                              total_entries: recursive ? nil : @accounts.count)
 
-    ActiveRecord::Associations::Preloader.new.preload(@accounts, [:root_account, :parent_account])
+    ActiveRecord::Associations.preload(@accounts, [:root_account, :parent_account])
     render json: @accounts.map { |a| account_json(a, @current_user, session, []) }
   end
 
@@ -753,16 +754,21 @@ class AccountsController < ApplicationController
     # We only want to return the permissions for single courses and not lists of courses.
     # sections, needs_grading_count, and total_score not valid as enrollments are needed
     includes -= %w[permissions sections needs_grading_count total_scores]
-
-    # don't calculate a total count for this endpoint. total_entries: nil
     all_precalculated_permissions = nil
-    GuardRail.activate(:secondary) do
-      @courses = Api.paginate(@courses, self, api_v1_account_courses_url, { total_entries: nil })
 
-      ActiveRecord::Associations::Preloader.new.preload(@courses, [:account, :root_account, course_account_associations: :account])
+    page_opts = { total_entries: nil }
+    if includes.include?("ui_invoked") && Setting.get("ui_invoked_count_pages", "true") == "true"
+      page_opts = {} # let Folio calculate total entries
+      includes.delete("ui_invoked")
+    end
+
+    GuardRail.activate(:secondary) do
+      @courses = Api.paginate(@courses, self, api_v1_account_courses_url, page_opts)
+
+      ActiveRecord::Associations.preload(@courses, [:account, :root_account, { course_account_associations: :account }])
       preload_teachers(@courses) if includes.include?("teachers")
       preload_teachers(@courses) if includes.include?("active_teachers")
-      ActiveRecord::Associations::Preloader.new.preload(@courses, [:enrollment_term]) if includes.include?("term") || includes.include?("concluded")
+      ActiveRecord::Associations.preload(@courses, [:enrollment_term]) if includes.include?("term") || includes.include?("concluded")
 
       if includes.include?("total_students")
         student_counts = StudentEnrollment.shard(@account.shard).not_fake.where("enrollments.workflow_state NOT IN ('rejected', 'completed', 'deleted', 'inactive')")
@@ -958,6 +964,16 @@ class AccountsController < ApplicationController
   # @argument account[settings][restrict_student_future_listing][locked] [Boolean]
   #   Lock this setting for sub-accounts and courses
   #
+  # @argument account[settings][conditional_release][value] [Boolean]
+  #   Enable or disable individual learning paths for students based on assessment
+  #
+  # @argument account[settings][conditional_release][locked] [Boolean]
+  #   Lock this setting for sub-accounts and courses
+  #
+  # @argument override_sis_stickiness [boolean]
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
+  #
   # @argument account[settings][lock_outcome_proficiency][value] [Boolean]
   #   [DEPRECATED] Restrict instructors from changing mastery scale
   #
@@ -1041,6 +1057,13 @@ class AccountsController < ApplicationController
           params[:account][:settings][:outgoing_email_default_name] = ""
         end
 
+        emoji_deny_list = params[:account][:settings].try(:delete, :emoji_deny_list)
+        if @account.feature_allowed?(:submission_comment_emojis) &&
+           @account.primary_settings_root_account? &&
+           !@account.site_admin?
+          @account.settings[:emoji_deny_list] = emoji_deny_list
+        end
+
         if @account.grants_right?(@current_user, :manage_site_settings)
           google_docs_domain = params[:account][:settings].try(:delete, :google_docs_domain)
           if @account.feature_enabled?(:google_docs_domain_restriction) &&
@@ -1082,7 +1105,7 @@ class AccountsController < ApplicationController
 
         # privacy settings
         unless @account.grants_right?(@current_user, :manage_privacy_settings)
-          %w[enable_fullstory enable_google_analytics].each do |setting|
+          %w[enable_fullstory].each do |setting|
             params[:account][:settings].try(:delete, setting)
           end
         end
@@ -1126,6 +1149,11 @@ class AccountsController < ApplicationController
             # Invalidate the cached k5 settings for all users in the account
             @account.root_account.clear_k5_cache
           end
+        end
+
+        # validate/normalize default due time parameter
+        if (default_due_time = params.dig(:account, :settings, :default_due_time, :value))
+          params[:account][:settings][:default_due_time][:value] = normalize_due_time(default_due_time)
         end
 
         # Set default Dashboard view
@@ -1174,7 +1202,7 @@ class AccountsController < ApplicationController
     if authorized_action(@account, @current_user, :read_as_admin)
       @account_users = @account.account_users.active
       @account_user_permissions_cache = AccountUser.create_permissions_cache(@account_users, @current_user, session)
-      ActiveRecord::Associations::Preloader.new.preload(@account_users, user: :communication_channels)
+      ActiveRecord::Associations.preload(@account_users, user: :communication_channels)
       order_hash = {}
       @account.available_account_roles.each_with_index do |role, idx|
         order_hash[role.id] = idx
@@ -1228,7 +1256,8 @@ class AccountsController < ApplicationController
                  REDIRECT_URI: MicrosoftSync::LoginService::REDIRECT_URI,
                  BASE_URL: MicrosoftSync::LoginService::BASE_URL
                },
-               COURSE_CREATION_SETTINGS: course_creation_settings
+               COURSE_CREATION_SETTINGS: course_creation_settings,
+               EMOJI_DENY_LIST: @account.root_account.settings[:emoji_deny_list]
              })
       js_env(edit_help_links_env, true)
     end
@@ -1685,6 +1714,21 @@ class AccountsController < ApplicationController
     @account.update_user_dashboards
   end
 
+  def account_calendar_settings
+    return unless authorized_action(@account, @current_user, :manage_account_calendar_visibility)
+
+    title = t("Account Calendars")
+    @page_title = title
+    add_crumb(title)
+    set_active_tab "account_calendars"
+    @current_user.add_to_visited_tabs("account_calendars")
+    js_env ACCOUNT_ID: @account.id
+    css_bundle :account_calendar_settings
+    js_bundle :account_calendar_settings
+    InstStatsd::Statsd.increment("account_calendars.settings.visit")
+    render html: '<div id="account-calendar-settings-container"></div>'.html_safe, layout: true
+  end
+
   def format_avatar_count(count = 0)
     count > 99 ? "99+" : count
   end
@@ -1705,7 +1749,8 @@ class AccountsController < ApplicationController
   end
 
   PERMITTED_SETTINGS_FOR_UPDATE = [:admins_can_change_passwords, :admins_can_view_notifications,
-                                   :allow_invitation_previews, :allow_sending_scores_in_emails,
+                                   :allow_additional_email_at_registration, :allow_invitation_previews,
+                                   :allow_sending_scores_in_emails,
                                    :author_email_in_notifications, :canvadocs_prefer_office_online,
                                    :can_add_pronouns, :can_change_pronouns,
                                    :consortium_parent_account, :consortium_can_create_own_accounts,
@@ -1723,7 +1768,7 @@ class AccountsController < ApplicationController
                                    :equella_teaser, :external_notification_warning, :global_includes,
                                    :google_docs_domain, :help_link_icon, :help_link_name,
                                    :include_integration_ids_in_gradebook_exports,
-                                   :include_students_in_global_survey, :license_type,
+                                   :include_students_in_global_survey, :kill_joy, :license_type,
                                    { lock_all_announcements: [:value, :locked] }.freeze,
                                    :login_handle_name, :mfa_settings, :no_enrollments_can_create_courses,
                                    :mobile_qr_login_is_enabled,
@@ -1746,10 +1791,12 @@ class AccountsController < ApplicationController
                                    :turnitin_host, :turnitin_account_id, :users_can_edit_name,
                                    { usage_rights_required: [:value, :locked] }.freeze,
                                    :app_center_access_token, :default_dashboard_view, :force_default_dashboard_view,
-                                   :smart_alerts_threshold, :enable_fullstory, :enable_google_analytics,
+                                   :smart_alerts_threshold, :enable_fullstory,
                                    { enable_as_k5_account: [:value, :locked] }.freeze,
                                    :enable_push_notifications, :teachers_can_create_courses_anywhere,
-                                   :students_can_create_courses_anywhere].freeze
+                                   :students_can_create_courses_anywhere,
+                                   { default_due_time: [:value] }.freeze,
+                                   { conditional_release: [:value, :locked] }.freeze,].freeze
 
   def permitted_account_attributes
     [:name, :turnitin_account_id, :turnitin_shared_secret, :include_crosslisted_courses,
@@ -1771,7 +1818,11 @@ class AccountsController < ApplicationController
   def strong_account_params
     # i'm doing this instead of normal params because we do too much hackery to the weak params, especially in plugins
     # and it breaks when we enforce inherited weak parameters (because we're not actually editing request.parameters anymore)
-    params.require(:account).permit(*permitted_account_attributes)
+    if params[:override_sis_stickiness] && !value_to_boolean(params[:override_sis_stickiness])
+      params.require(:account).permit(*permitted_account_attributes - [*@account.stuck_sis_fields])
+    else
+      params.require(:account).permit(*permitted_account_attributes)
+    end
   end
 
   def edit_help_links_env

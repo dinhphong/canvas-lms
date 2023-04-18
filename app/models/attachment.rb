@@ -45,9 +45,10 @@ class Attachment < ActiveRecord::Base
 
   CLONING_ERROR_TYPE = "attachment_clone_url"
 
-  BUTTONS_AND_ICONS = "buttons_and_icons"
+  ICON_MAKER_ICONS = "icon_maker_icons"
   UNCATEGORIZED = "uncategorized"
-  VALID_CATEGORIES = [BUTTONS_AND_ICONS, UNCATEGORIZED].freeze
+  VALID_CATEGORIES = [ICON_MAKER_ICONS, UNCATEGORIZED].freeze
+  VALID_VISIBILITIES = %w[inherit context institution public].freeze
 
   include HasContentTags
   include ContextModuleItem
@@ -161,7 +162,7 @@ class Attachment < ActiveRecord::Base
   after_save_and_attachment_processing :ensure_media_object
 
   # this mixin can be added to a has_many :attachments association, and it'll
-  # handle finding replaced attachments. In other words, if an attachment fond
+  # handle finding replaced attachments. In other words, if an attachment found
   # by id is deleted but an active attachment in the same context has the same
   # path, it'll return that attachment.
   module FindInContextAssociation
@@ -364,8 +365,13 @@ class Attachment < ActiveRecord::Base
     end
     dup.updated_at = Time.zone.now
     dup.clone_updated = true
-    dup.set_publish_state_for_usage_rights unless locked?
+    dup.set_publish_state_for_usage_rights unless locked? || usage_rights_not_required(options)
     dup
+  end
+
+  def usage_rights_not_required(options)
+    options[:migration]&.for_course_copy? &&
+      !options[:migration].source_course.usage_rights_required
   end
 
   def self.find_existing_attachment_for_clone(context, options = {})
@@ -423,6 +429,7 @@ class Attachment < ActiveRecord::Base
   validates :context_id, :context_type, :workflow_state, :category, presence: true
   validates :content_type, length: { maximum: maximum_string_length, allow_blank: true }
   validates :category, inclusion: { in: VALID_CATEGORIES }
+  validates :visibility_level, inclusion: { in: VALID_VISIBILITIES }
 
   # related_attachments: our root attachment, anyone who shares our root attachment,
   # and anyone who calls us a root attachment
@@ -533,9 +540,13 @@ class Attachment < ActiveRecord::Base
   end
 
   def set_word_count
-    if word_count.nil? && !deleted? && file_state != "broken" && Account.site_admin.feature_enabled?(:word_count_in_speed_grader)
+    if word_count.nil? && !deleted? && file_state != "broken"
       delay(singleton: "attachment_set_word_count_#{global_id}").update_word_count
     end
+  end
+
+  def remove_attachments_from_drafts
+    submission_draft_attachments.destroy_all
   end
 
   def update_word_count
@@ -1223,7 +1234,7 @@ class Attachment < ActiveRecord::Base
       "image/gif" => "image",
       "image/bmp" => "image",
       "image/svg+xml" => "image",
-      # "image/webp" => "image", not supported by safari as of Version 13.1.1
+      "image/webp" => "image",
       "image/vnd.microsoft.icon" => "image",
       "application/x-rar" => "zip",
       "application/x-rar-compressed" => "zip",
@@ -1264,9 +1275,16 @@ class Attachment < ActiveRecord::Base
     @associated_with_submission ||= attachment_associations.where(context_type: "Submission").exists?
   end
 
-  def user_can_read_through_context?(user, session)
-    context&.grants_right?(user, session, :read) ||
-      (context.is_a?(AssessmentQuestion) && context.user_can_see_through_quiz_question?(user, session))
+  def user_can_read_through_context?(user, session, through_assessment: true)
+    return true if through_assessment && context.is_a?(AssessmentQuestion) && context.user_can_see_through_quiz_question?(user, session)
+
+    if supports_visibility?
+      (computed_visibility_level == "public") ||
+        (computed_visibility_level == "institution" && user&.persisted?) ||
+        (computed_visibility_level == "context" && context&.grants_right?(user, session, :read_as_member))
+    else
+      context&.grants_right?(user, session, :read)
+    end
   end
 
   set_policy do
@@ -1292,7 +1310,9 @@ class Attachment < ActiveRecord::Base
     given { public? }
     can :read and can :download
 
-    given { |user, session| context&.grants_right?(user, session, :read) } # students.include? user }
+    given do |user, session|
+      user_can_read_through_context?(user, session, through_assessment: false)
+    end
     can :read
 
     given { |user, session| context&.grants_right?(user, session, :read_as_admin) }
@@ -1305,16 +1325,19 @@ class Attachment < ActiveRecord::Base
 
     given do |_user, session|
       (u = session.try(:file_access_user)) &&
-        (user_can_read_through_context?(u, session) ||
-          (context.respond_to?(:is_public_to_auth_users?) && context.is_public_to_auth_users?)) &&
+        user_can_read_through_context?(u, session) &&
         session["file_access_expiration"] && session["file_access_expiration"].to_i > Time.zone.now.to_i
+    end
+    can :read
+
+    given do |user|
+      user && attachment_associations.joins(:submission).where(submissions: { user: user }).exists?
     end
     can :read
 
     given do |_user, session|
       (u = session.try(:file_access_user)) &&
-        (user_can_read_through_context?(u, session) ||
-          (context.respond_to?(:is_public_to_auth_users?) && context.is_public_to_auth_users?)) &&
+        user_can_read_through_context?(u, session) &&
         !locked_for?(u, check_policies: true) &&
         session["file_access_expiration"] && session["file_access_expiration"].to_i > Time.zone.now.to_i
     end
@@ -1454,6 +1477,21 @@ class Attachment < ActiveRecord::Base
     where.not(condition_sql)
   }
 
+  scope :visible_to, lambda { |user, context|
+    return all unless context_supports_visibility?(context)
+
+    vlevels = []
+    vlevels << "context" if context&.grants_right?(user, nil, :read_as_member)
+    vlevels << "institution" if user&.persisted?
+    vlevels << "public"
+
+    context_setting = context.files_visibility_option
+    context_setting = "context" if context_setting == context.class.name.downcase
+    vlevels << "inherit" if vlevels.include?(context_setting)
+
+    where(visibility_level: vlevels)
+  }
+
   def self.build_content_types_sql(types)
     clauses = []
     types.each do |type|
@@ -1496,6 +1534,7 @@ class Attachment < ActiveRecord::Base
     # if the attachment being deleted belongs to a user and the uuid (hash of file) matches the avatar_image_url
     # then clear the avatar_image_url value.
     context.clear_avatar_image_url_with_uuid(self.uuid) if context_type == "User" && self.uuid.present?
+    remove_attachments_from_drafts
     true
   end
 
@@ -1503,19 +1542,18 @@ class Attachment < ActiveRecord::Base
   # object. It will replace the attachment content with a file_removed file.
   def destroy_content_and_replace(deleted_by_user = nil)
     shard.activate do
+      file_removed_path = self.class.file_removed_path
+      new_name = File.basename(file_removed_path)
       att = root_attachment_id? ? root_attachment : self
-      return true if Purgatory.where(attachment_id: att).active.exists?
+      return true if att.display_name == new_name
 
-      att.send_to_purgatory(deleted_by_user)
+      att.send_to_purgatory(deleted_by_user) unless Purgatory.where(attachment_id: att).active.exists?
       att.destroy_content
       att.thumbnail&.destroy
 
-      file_removed_path = self.class.file_removed_path
-      new_name = File.basename(file_removed_path)
-
       if att.instfs_hosted? && InstFS.enabled?
-        # dupliciate the base file_removed file to a unique uuid
-        att.instfs_uuid = InstFS.duplicate_file(self.class.file_removed_base_instfs_uuid)
+        # duplicate the base file_removed file to a unique uuid
+        att.instfs_uuid = InstFS.duplicate_file(Attachment.file_removed_base_instfs_uuid)
       else
         Attachments::Storage.store_for_attachment(att, File.open(file_removed_path))
       end
@@ -1558,27 +1596,29 @@ class Attachment < ActiveRecord::Base
   def send_to_purgatory(deleted_by_user = nil)
     make_rootless
     new_instfs_uuid = nil
-    if Attachment.s3_storage? && s3object.exists?
-      s3object.copy_to(bucket.object(purgatory_filename))
-    elsif instfs_hosted? && InstFS.enabled?
+    if instfs_hosted? && InstFS.enabled?
       # copy to a new instfs file
       new_instfs_uuid = InstFS.duplicate_file(instfs_uuid)
+    elsif Attachment.s3_storage? && s3object.exists?
+      s3object.copy_to(bucket.object(purgatory_filename))
     elsif Attachment.local_storage?
       FileUtils.mkdir(local_purgatory_directory) unless File.exist?(local_purgatory_directory)
       FileUtils.cp full_filename, local_purgatory_file
     end
-    if Purgatory.where(attachment_id: self).exists?
-      p = Purgatory.where(attachment_id: self).take
+    if (p = Purgatory.find_by(attachment_id: self))
       p.deleted_by_user = deleted_by_user
       p.old_filename = filename
       p.old_display_name = display_name
       p.old_content_type = content_type
+      p.old_workflow_state = workflow_state
+      p.old_file_state = file_state
       p.new_instfs_uuid = new_instfs_uuid
       p.workflow_state = "active"
       p.save!
     else
-      Purgatory.create!(attachment: self, old_filename: filename, old_display_name: display_name,
-                        old_content_type: content_type, new_instfs_uuid: new_instfs_uuid, deleted_by_user: deleted_by_user)
+      Purgatory.create!(attachment: self, old_filename: filename, old_display_name: display_name, old_content_type: content_type,
+                        old_file_state: file_state, old_workflow_state: workflow_state, new_instfs_uuid: new_instfs_uuid,
+                        deleted_by_user: deleted_by_user)
     end
   end
 
@@ -1603,14 +1643,12 @@ class Attachment < ActiveRecord::Base
     write_attribute(:display_name, p.old_display_name)
     write_attribute(:content_type, p.old_content_type)
     write_attribute(:root_attachment_id, nil)
+    write_attribute(:file_state, p.old_file_state) if p.old_file_state
+    write_attribute(:workflow_state, p.old_workflow_state) if p.old_workflow_state
 
-    if InstFS.enabled?
-      if p.new_instfs_uuid
-        # just set it to the copied uuid, shouldn't get deleted when expired since we'll set p to 'restored'
-        write_attribute(:instfs_uuid, p.new_instfs_uuid)
-      else
-        raise "purgatory record was created before being fixed for inst-fs"
-      end
+    if InstFS.enabled? && p.new_instfs_uuid
+      # just set it to the copied uuid, shouldn't get deleted when expired since we'll set p to 'restored'
+      write_attribute(:instfs_uuid, p.new_instfs_uuid)
     elsif Attachment.s3_storage?
       old_s3object = bucket.object(purgatory_filename)
       raise Attachment::FileDoesNotExist unless old_s3object.exists?
@@ -1639,7 +1677,7 @@ class Attachment < ActiveRecord::Base
       self.instfs_uuid = nil
     elsif Attachment.s3_storage?
       s3object.delete unless ApplicationController.test_cluster?
-    else
+    elsif File.exist?(full_filename)
       FileUtils.rm full_filename
     end
   end
@@ -1778,7 +1816,8 @@ class Attachment < ActiveRecord::Base
     warnable_errors = [
       Canvadocs::BadGateway,
       Canvadoc::UploadTimeout,
-      Canvadocs::ServerError
+      Canvadocs::ServerError,
+      Canvadocs::HeavyLoadError
     ]
     error_level = warnable_errors.any? { |kls| e.is_a?(kls) } ? :warn : :error
     update_attribute(:workflow_state, "errored")
@@ -2297,5 +2336,23 @@ class Attachment < ActiveRecord::Base
     ["application/vnd.openxmlformats-officedocument.wordprocessingml.document",
      "application/x-docx", "application/rtf",
      "text/rtf"].include?(mimetype) || ["pdf", "text"].include?(mime_class)
+  end
+
+  def self.context_supports_visibility?(context)
+    context.respond_to?(:files_visibility_option)
+  end
+
+  def supports_visibility?
+    self.class.context_supports_visibility?(context)
+  end
+
+  def computed_visibility_level
+    return nil unless supports_visibility?
+    return "context" if context.respond_to?(:available?) && !context.available?
+
+    vl = visibility_level || "inherit"
+    vl = context.files_visibility_option if vl == "inherit"
+    vl = "context" if vl == context.class.name.downcase
+    vl
   end
 end

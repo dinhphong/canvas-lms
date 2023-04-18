@@ -24,7 +24,7 @@ class Quizzes::QuizSubmissionEventPartitioner
     Setting.get("quiz_events_partitions_precreate_months", 2).to_i
   end
 
-  def self.process(in_migration = false)
+  def self.process(in_migration = false, prune: false)
     Shard.current.database_server.unguard do
       GuardRail.activate(:deploy) do
         log "*" * 80
@@ -34,13 +34,23 @@ class Quizzes::QuizSubmissionEventPartitioner
 
         partman.ensure_partitions(precreate_tables)
 
-        Shard.current.database_server.unguard { partman.prune_partitions(Setting.get("quiz_events_partitions_keep_months", 6).to_i) }
+        if prune
+          Shard.current.database_server.unguard do
+            partman.prune_partitions(Setting.get("quiz_events_partitions_keep_months", 6).to_i)
+          end
+        end
 
         log "Done. Bye!"
         log "*" * 80
-        ActiveRecord::Base.connection_pool.current_pool.disconnect! unless in_migration || Rails.env.test?
+        unless in_migration || Rails.env.test?
+          ActiveRecord::Base.connection_pool.disconnect!
+        end
       end
     end
+  end
+
+  def self.prune
+    process(prune: true)
   end
 
   def self.log(*args)

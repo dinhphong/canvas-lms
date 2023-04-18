@@ -149,10 +149,20 @@ class DiscussionTopic < ActiveRecord::Base
   def sections_for(user)
     return unless is_section_specific?
 
-    CourseSection.where(id: DiscussionTopicSectionVisibility.active.where(discussion_topic_id: id)
-      .where("EXISTS (?)", Enrollment.active_or_pending.where(user_id: user)
-        .where("enrollments.course_section_id = discussion_topic_section_visibilities.course_section_id"))
-      .select("discussion_topic_section_visibilities.course_section_id"))
+    unlocked_teacher = context.enrollments.active.instructor
+                              .where(limit_privileges_to_course_section: false, user: user)
+
+    if unlocked_teacher.count > 0
+      CourseSection.where(id: DiscussionTopicSectionVisibility.active
+                                                              .where(discussion_topic_id: id)
+                                                              .select("discussion_topic_section_visibilities.course_section_id"))
+    else
+      CourseSection.where(id: DiscussionTopicSectionVisibility.active.where(discussion_topic_id: id)
+                                                              .where("EXISTS (?)", Enrollment.active_or_pending
+                                                                                             .where(user_id: user)
+                                                                                             .where("enrollments.course_section_id = discussion_topic_section_visibilities.course_section_id"))
+                                                              .select("discussion_topic_section_visibilities.course_section_id"))
+    end
   end
 
   def address_book_context_for(user)
@@ -323,7 +333,10 @@ class DiscussionTopic < ActiveRecord::Base
     return if deleted?
 
     if !assignment_id && @old_assignment_id
-      context_module_tags.each(&:confirm_valid_module_requirements)
+      context_module_tags.find_each do |cmt|
+        cmt.confirm_valid_module_requirements
+        cmt.update_course_pace_module_items
+      end
     end
     if @old_assignment_id
       Assignment.where(id: @old_assignment_id, context_id: context_id, context_type: context_type, submission_types: "discussion_topic").update_all(workflow_state: "deleted", updated_at: Time.now.utc)
@@ -349,9 +362,11 @@ class DiscussionTopic < ActiveRecord::Base
     # make sure that if the topic has a new assignment (either by going from
     # ungraded to graded, or from one assignment to another; we ignore the
     # transition from graded to ungraded) we acknowledge that the users that
-    # have posted have contributed to the topic
+    # have posted have contributed to the topic and that course paces are up
+    # to date
     if assignment_id && saved_change_to_assignment_id?
       recalculate_context_module_actions!
+      context_module_tags.find_each(&:update_course_pace_module_items)
     end
   end
   protected :update_assignment
@@ -1042,6 +1057,10 @@ class DiscussionTopic < ActiveRecord::Base
       (([user.id] + associated_user_ids) & user_ids_who_have_posted_and_admins).any?
   end
 
+  def locked_announcement?
+    is_a?(Announcement) && locked?
+  end
+
   def reply_from(opts)
     raise IncomingMail::Errors::ReplyToDeletedDiscussion if deleted?
     raise IncomingMail::Errors::UnknownAddress if context.root_account.deleted?
@@ -1061,7 +1080,7 @@ class DiscussionTopic < ActiveRecord::Base
     else
       shard.activate do
         entry = discussion_entries.new(message: message, user: user)
-        if entry.grants_right?(user, :create) && !comments_disabled?
+        if entry.grants_right?(user, :create) && !comments_disabled? && !locked_announcement?
           entry.save!
           entry
         else
@@ -1080,6 +1099,7 @@ class DiscussionTopic < ActiveRecord::Base
     save
 
     if for_assignment? && root_topic_id.blank? && !assignment.deleted?
+      assignment.skip_downstream_changes! if @skip_downstream_changes
       assignment.destroy
     end
 
@@ -1093,6 +1113,7 @@ class DiscussionTopic < ActiveRecord::Base
         dtsv.save
       end
     end
+    discussion_topic_section_visibilities.reload
     self.workflow_state = can_unpublish? ? "unpublished" : "active"
     save
 
@@ -1312,9 +1333,9 @@ class DiscussionTopic < ActiveRecord::Base
                                                   .pluck(:course_section_id)
     user_ids = non_nil_users.pluck(:id)
     # Context is known to be a course here
-    users_in_sections = context.enrollments.active
+    users_in_sections = context.enrollments.active_or_pending
                                .where(user_id: user_ids, course_section_id: section_ids).pluck(:user_id).to_set
-    unlocked_teachers = context.enrollments.active.instructor
+    unlocked_teachers = context.enrollments.active_or_pending.instructor
                                .where(limit_privileges_to_course_section: false, user_id: user_ids)
                                .pluck(:user_id).to_set
     permitted_user_ids = users_in_sections.union(unlocked_teachers)

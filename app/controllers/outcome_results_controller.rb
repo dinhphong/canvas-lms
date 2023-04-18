@@ -190,6 +190,7 @@ class OutcomeResultsController < ApplicationController
   include Api::V1::OutcomeResults
   include Outcomes::Enrollments
   include Outcomes::ResultAnalytics
+  include CanvasOutcomesHelper
 
   before_action :require_user
   before_action :require_context
@@ -231,12 +232,24 @@ class OutcomeResultsController < ApplicationController
   #    {
   #      outcome_results: [OutcomeResult]
   #    }
+  # used in sLMGB
   def index
+    include_hidden_value = value_to_boolean(params[:include_hidden])
     @results = find_results(
-      include_hidden: value_to_boolean(params[:include_hidden])
+      include_hidden: include_hidden_value
     )
-    @results = Api.paginate(@results, self, api_v1_course_outcome_results_url)
-    json = outcome_results_json(@results)
+    @outcome_service_results = find_outcomes_service_results(
+      include_hidden: include_hidden_value
+    )
+    json = nil
+    if @outcome_service_results.nil?
+      @results = Api.paginate(@results, self, api_v1_course_outcome_results_url)
+      json = outcome_results_json(@results)
+    else
+      @outcome_service_results.push(@results).flatten!
+      @outcome_service_results = Api.paginate(@outcome_service_results, self, api_v1_course_outcome_results_url)
+      json = outcome_results_json(@outcome_service_results)
+    end
     json[:linked] = linked_include_collections if params[:include].present?
     render json: json
   end
@@ -286,6 +299,15 @@ class OutcomeResultsController < ApplicationController
   # @argument sort_order [String, "asc", "desc"]
   #   If sorting requested, then this allows changing the default sort order of
   #   ascending to descending.
+  #
+  # @argument add_defaults [Boolean]
+  #   If defaults are requested, then color and mastery level defaults will be
+  #   added to outcome ratings in the rollup. This will only take effect if
+  #   the Account Level Mastery Scales FF is DISABLED
+  #
+  # @argument contributing_scores [Boolean]
+  #   If contributing scores are requested, then each individual outcome score will
+  #   also include all graded artifacts that contributed to the outcome score
   #
   # @example_response
   #    {
@@ -347,12 +369,29 @@ class OutcomeResultsController < ApplicationController
     )
   end
 
+  def find_outcomes_service_results(opts = {})
+    find_outcomes_service_outcome_results(
+      users: opts[:all_users] ? @all_users : @users,
+      context: @context,
+      outcomes: @outcomes,
+      **opts
+    )
+  end
+
+  # used in sLMGB/LMGB
   def user_rollups(opts = {})
     excludes = Api.value_to_array(params[:exclude]).uniq
     filter_users_by_excludes
 
     @results = find_results(opts).preload(:user)
-    outcome_results_rollups(results: @results, users: @users, excludes: excludes, context: @context)
+    ActiveRecord::Associations.preload(@results, :learning_outcome)
+    @outcome_service_results = find_outcomes_service_results(opts)
+    if @outcome_service_results.nil?
+      outcome_results_rollups(results: @results, users: @users, excludes: excludes, context: @context)
+    else
+      @outcome_service_results.push(@results).flatten!
+      outcome_results_rollups(results: @outcome_service_results, users: @users, excludes: excludes, context: @context)
+    end
   end
 
   def filter_users_by_excludes(aggregate = false)
@@ -366,17 +405,30 @@ class OutcomeResultsController < ApplicationController
     exclude_inactive = excludes.include? "inactive_enrollments"
     return unless exclude_concluded || exclude_inactive
 
-    filters = []
+    # automatically filter out users whose enrollment was deleted
+    filters = ["deleted"]
     filters << "completed" if exclude_concluded
     filters << "inactive" if exclude_inactive
 
-    ActiveRecord::Associations::Preloader.new.preload(@users, :enrollments)
+    ActiveRecord::Associations.preload(@users, :enrollments)
     @users = @users.reject { |u| u.enrollments.all? { |e| filters.include? e.workflow_state } }
   end
 
+  # used in LMGB
+  # For merge & after performance testing
+  # Flagging potential issue - no reason to pull all the results for finding users
+  # why not send the already pulled results to the definition and use that to filter
   def remove_users_with_no_results
     userids_with_results = find_results.pluck(:user_id).uniq
-    @users = @users.select { |u| userids_with_results.include? u.id }
+    os_userids_with_results = find_outcomes_service_results
+
+    if os_userids_with_results.nil?
+      @users = @users.select { |u| userids_with_results.include? u.id }
+    else
+      os_userids_with_results = os_userids_with_results.pluck(:user_id).uniq
+      os_userids_with_results.push(userids_with_results).flatten!
+      @users = @users.select { |u| os_userids_with_results.include? u.id }
+    end
   end
 
   def current_user_enrollments
@@ -438,12 +490,22 @@ class OutcomeResultsController < ApplicationController
     json
   end
 
+  # used in LMGB
   def aggregate_rollups_json
     # calculating averages for all users in the context and only returning one
     # rollup, so don't paginate users in this method.
     filter_users_by_excludes(true)
     @results = find_results(all_users: false).preload(:user)
-    aggregate_rollups = [aggregate_outcome_results_rollup(@results, @context, params[:aggregate_stat])]
+    ActiveRecord::Associations.preload(@results, :learning_outcome)
+
+    @outcome_service_results = find_outcomes_service_results(all_users: false)
+    aggregate_rollups = nil
+    if @outcome_service_results.nil?
+      aggregate_rollups = [aggregate_outcome_results_rollup(@results, @context, params[:aggregate_stat])]
+    else
+      @outcome_service_results.push(@results).flatten!
+      aggregate_rollups = [aggregate_outcome_results_rollup(@outcome_service_results, @context, params[:aggregate_stat])]
+    end
     aggregate_outcome_results_rollups_json(aggregate_rollups)
     # no pagination, so no meta field
   end
@@ -495,8 +557,9 @@ class OutcomeResultsController < ApplicationController
   end
 
   def include_assignments
-    assignments = @results.map { |result| result.assignment || result.alignment&.content }
-    outcome_results_assignments_json(assignments)
+    results = @outcome_service_results.nil? ? @results : @outcome_service_results
+    assignments = results.map { |result| result.assignment || result.alignment&.content }
+    outcome_results_assignments_json(assignments.uniq)
   end
 
   def require_outcome_context
@@ -587,7 +650,7 @@ class OutcomeResultsController < ApplicationController
         associations << { associated_asset: :learning_outcome_group }
       end
       @outcome_links.each_slice(100) do |outcome_links_slice|
-        ActiveRecord::Associations::Preloader.new.preload(outcome_links_slice, associations)
+        ActiveRecord::Associations.preload(outcome_links_slice, associations)
       end
       @outcomes = @outcome_links.map(&:learning_outcome_content)
     end

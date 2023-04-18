@@ -35,6 +35,12 @@ module Types
       value "unpublished"
       value "published"
       value "deleted"
+      value "duplicating"
+      value "failed_to_duplicate"
+      value "importing"
+      value "fail_to_import"
+      value "migrating"
+      value "failed_to_migrate"
     end
 
     GRADING_TYPES = Assignment::ALLOWED_GRADING_TYPES.zip(Assignment::ALLOWED_GRADING_TYPES).to_h
@@ -193,6 +199,13 @@ module Types
 
     field :due_date_required, Boolean, method: :due_date_required?, null: true
     field :can_unpublish, Boolean, method: :can_unpublish?, null: true
+
+    field :originality_report_visibility, String, null: true
+    def originality_report_visibility
+      return nil if object.turnitin_settings.empty?
+
+      object.turnitin_settings[:originality_report_visibility]
+    end
 
     field :rubric, RubricType, null: true
     def rubric

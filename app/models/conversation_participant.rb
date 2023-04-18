@@ -596,6 +596,7 @@ class ConversationParticipant < ActiveRecord::Base
       participant = user.all_conversations.where(conversation_id: conversation_id).first
       raise t("not_participating", "The user is not participating in this conversation") unless participant
 
+      InstStatsd::Statsd.increment("inbox.conversation.unarchived.legacy") if participant[:workflow_state] == "archived" && ["mark_as_read", "mark_as_unread"].include?(update_params[:event])
       participant.update_one(update_params)
     end
   end
@@ -604,6 +605,10 @@ class ConversationParticipant < ActiveRecord::Base
     progress = user.progresses.create! tag: "conversation_batch_update", completion: 0.0
     job = ConversationParticipant.delay(ignore_transaction: true)
                                  .do_batch_update(progress, user, conversation_ids, update_params)
+
+    # this method is never run by :react_inbox, since at the time of this writing
+    # the update_conversation_participants mutation only runs #update and not #batch_update
+    InstStatsd::Statsd.count("inbox.conversation.archived.legacy", conversation_ids.size) if update_params[:event] == "archive"
     progress.user_id = user.id
     progress.delayed_job_id = job.id
     progress.save!

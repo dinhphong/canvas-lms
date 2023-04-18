@@ -20,7 +20,13 @@
 class ImpossibleCredentialsError < ArgumentError; end
 
 class Pseudonym < ActiveRecord::Base
+  # this field is used for audit logging.
+  # if a request is deleting a pseudonym, it should set this value
+  # before persisting the change.
+  attr_writer :current_user
+
   include Workflow
+  include SearchTermHelper
 
   has_many :session_persistence_tokens
   belongs_to :account
@@ -30,6 +36,10 @@ class Pseudonym < ActiveRecord::Base
   has_many :sis_enrollments, class_name: "Enrollment", inverse_of: :sis_pseudonym
   has_many :auditor_authentication_records,
            class_name: "Auditors::ActiveRecord::AuthenticationRecord",
+           dependent: :destroy,
+           inverse_of: :pseudonym
+  has_many :auditor_records,
+           class_name: "Auditors::ActiveRecord::PseudonymRecord",
            dependent: :destroy,
            inverse_of: :pseudonym
   belongs_to :communication_channel
@@ -48,6 +58,7 @@ class Pseudonym < ActiveRecord::Base
     record.errors.add(attr, "blank?") unless value || record.user
   end
   before_validation :validate_unique_id
+  before_update :audit_log_update
   before_destroy :retire_channels
   validates :declared_user_type,
             allow_nil: true,
@@ -171,6 +182,14 @@ class Pseudonym < ActiveRecord::Base
     auth_id = aac.try(:auth_provider_filter)
     active_only.by_unique_id(unique_id).where(authentication_provider_id: auth_id)
                .order("authentication_provider_id NULLS LAST").take
+  end
+
+  def audit_log_update
+    return if Setting.get("pseudonym_auditor_killswitch", "false") == "true"
+    return unless workflow_state_changed? && workflow_state == "deleted"
+
+    performing_user = @current_user || Canvas.infer_user
+    Auditors::Pseudonym.record(self, performing_user, action: "deleted")
   end
 
   def set_password_changed
@@ -496,8 +515,18 @@ class Pseudonym < ActiveRecord::Base
   end
   alias_method :has_changes_to_save?, :changed?
 
-  def attribute_names_for_partial_writes
-    strip_inferred_authentication_provider(super)
+  if Rails.version < "7.0"
+    def attribute_names_for_partial_writes
+      strip_inferred_authentication_provider(super)
+    end
+  else
+    def attribute_names_for_partial_inserts
+      strip_inferred_authentication_provider(super)
+    end
+
+    def attribute_names_for_partial_updates
+      strip_inferred_authentication_provider(super)
+    end
   end
 
   def strip_inferred_authentication_provider(attribute_names)

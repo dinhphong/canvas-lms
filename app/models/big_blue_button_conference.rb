@@ -50,6 +50,54 @@ class BigBlueButtonConference < WebConference
     visible: false
   }
 
+  user_setting_field :share_webcam, {
+    name: -> { t("Share webcam") },
+    description: -> { t("Share webcam") },
+    type: :boolean,
+    default: true,
+    visible: false
+  }
+
+  user_setting_field :share_microphone, {
+    name: -> { t("Share microphone") },
+    description: -> { t("Share microphone") },
+    type: :boolean,
+    default: true,
+    visible: false
+  }
+
+  user_setting_field :send_public_chat, {
+    name: -> { t("Send public chat messages") },
+    description: -> { t("Send public chat messages") },
+    type: :boolean,
+    default: true,
+    visible: false
+  }
+
+  user_setting_field :send_private_chat, {
+    name: -> { t("Send private chat messages") },
+    description: -> { t("Send private chat messages") },
+    type: :boolean,
+    default: true,
+    visible: false
+  }
+
+  user_setting_field :enable_waiting_room, {
+    name: -> { t("Enable waiting room") },
+    description: -> { t("Enable waiting room") },
+    type: :boolean,
+    default: false,
+    visible: false
+  }
+
+  user_setting_field :share_other_webcams, {
+    name: -> { t("See other viewers webcams") },
+    description: -> { t("See other viewers webcams") },
+    type: :boolean,
+    default: true,
+    visible: false
+  }
+
   class << self
     def send_request(action, options, use_fallback_config: false)
       url_str = generate_request(action, options, use_fallback_config: use_fallback_config)
@@ -134,18 +182,29 @@ class BigBlueButtonConference < WebConference
     settings[:record] &&= config[:recording_enabled]
     settings[:domain] ||= config[:domain] # save the domain
     current_host = URI(settings[:default_return_url] || "http://www.instructure.com").host
-    response = send_request(:create, {
-                              :meetingID => conference_key,
-                              :name => title,
-                              :voiceBridge => format("%020d", global_id),
-                              :attendeePW => settings[:user_key],
-                              :moderatorPW => settings[:admin_key],
-                              :logoutURL => (settings[:default_return_url] || "http://www.instructure.com"),
-                              :record => settings[:record] ? "true" : "false",
-                              :welcome => settings[:record] ? t("This conference may be recorded.") : "",
-                              "meta_canvas-recording-ready-user" => recording_ready_user,
-                              "meta_canvas-recording-ready-url" => recording_ready_url(current_host)
-                            }) or return nil
+    req_params = {
+      :meetingID => conference_key,
+      :name => title,
+      :voiceBridge => format("%020d", global_id),
+      :attendeePW => settings[:user_key],
+      :moderatorPW => settings[:admin_key],
+      :logoutURL => (settings[:default_return_url] || "http://www.instructure.com"),
+      :record => settings[:record] ? true : false,
+      "meta_canvas-recording-ready-user" => recording_ready_user,
+      "meta_canvas-recording-ready-url" => recording_ready_url(current_host)
+    }
+    if Account.site_admin.feature_enabled? :bbb_modal_update
+      req_params.merge!({
+                          lockSettingsDisableCam: settings[:share_webcam] ? false : true,
+                          lockSettingsDisableMic: settings[:share_microphone] ? false : true,
+                          lockSettingsDisablePublicChat: settings[:send_public_chat] ? false : true,
+                          lockSettingsDisablePrivateChat: settings[:send_private_chat] ? false : true,
+                          guestPolicy: settings[:enable_waiting_room] ? "ASK_MODERATOR" : "ALWAYS_ACCEPT",
+                          webcamsOnlyForModerator: settings[:share_other_webcams] ? false : true,
+                        })
+    end
+
+    response = send_request(:create, req_params) or return nil
     @conference_active = true
     settings[:create_time] = response[:createTime] if response.present?
     save

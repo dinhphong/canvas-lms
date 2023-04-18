@@ -29,14 +29,16 @@ module Lti
 
       before_action :require_context
       before_action :validate_jwt
+      before_action :validate_return_url_data
       before_action :require_context_update_rights
       before_action :require_tool
 
       def deep_linking_response
-        # one single non-line item content item for an existing module should:
+        # one single non-line item content item for an existing module using
+        # the module item selection dialog should:
         # * not create a resource link
         # * not reload the page
-        if add_item_to_existing_module? && lti_resource_links.length == 1 && !add_assignment?
+        if for_placement?(:link_selection) && lti_resource_links.length == 1 && !add_assignment?
           render_content_items(reload_page: false)
           return
         end
@@ -47,7 +49,7 @@ module Lti
         # * not reload the page
         unless create_resources_from_content_items?
           lti_resource_links.each do |content_item|
-            resource_link = Lti::ResourceLink.create_with(context, tool, content_item[:custom])
+            resource_link = Lti::ResourceLink.create_with(context, tool, content_item[:custom], content_item[:url])
             content_item[:lookup_uuid] = resource_link&.lookup_uuid
           end
 
@@ -55,14 +57,19 @@ module Lti
           return
         end
 
-        # deep linking on the new assignment page should:
+        # deep linking on the new/edit assignment page should:
         # * only use the first content item to create an assignment
         # * not create a new module
         # * reload the page
         if for_placement?(:assignment_selection)
+          unless @context.root_account.feature_enabled? :lti_assignment_page_line_items
+            render_content_items(reload_page: false)
+            return
+          end
+
           item_for_assignment = lti_resource_links.first
           if allow_line_items? && item_for_assignment.key?(:lineItem) && validate_line_item!(item_for_assignment)
-            create_assignment!(item_for_assignment)
+            create_update_assignment!(item_for_assignment, return_url_parameters[:assignment_id])
           end
 
           render_content_items(items: [item_for_assignment])
@@ -75,7 +82,7 @@ module Lti
           next unless allow_line_items? && content_item.key?(:lineItem)
           next unless validate_line_item!(content_item)
 
-          create_assignment!(content_item)
+          create_update_assignment!(content_item)
         end
 
         # receiving only invalid content items should:
@@ -88,7 +95,7 @@ module Lti
           return
         end
 
-        # creating only assignments from the assigments page should:
+        # creating only assignments from the assignments page should:
         # * not create a new module
         # * reload the page
         if for_placement?(:course_assignments_menu) && allow_line_items? && lti_resource_links.all? { |item| item.key?(:lineItem) }
@@ -105,7 +112,7 @@ module Lti
         context_module = if create_new_module?
                            @context.context_modules.create!(name: I18n.t("New Content From App"), workflow_state: "unpublished")
                          else
-                           @context.context_modules.not_deleted.find(params[:context_module_id])
+                           @context.context_modules.not_deleted.find(return_url_parameters[:context_module_id])
                          end
 
         lti_resource_links.each do |content_item|
@@ -119,17 +126,22 @@ module Lti
         end
 
         render_content_items
+      rescue => e
+        code ||= response_code_for_rescue(e) if e
+        InstStatsd::Statsd.increment("canvas.deep_linking_controller.request_error", tags: { code: code })
+        raise e
       end
 
       private
 
       def for_placement?(placement)
-        params[:placement]&.to_sym == placement
+        return_url_parameters[:placement]&.to_sym == placement
       end
 
       def render_content_items(items: content_items, reload_page: true)
         js_env({
                  deep_link_response: {
+                   placement: return_url_parameters[:placement],
                    content_items: items,
                    msg: messaging_value("msg"),
                    log: messaging_value("log"),

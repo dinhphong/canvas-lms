@@ -92,7 +92,8 @@ class ContextController < ApplicationController
         manage_students: manage_students,
         add_users_to_course: can_add_enrollments,
         read_reports: @context.grants_right?(@current_user, session, :read_reports),
-        can_add_groups: can_do(@context.groups.temp_record, @current_user, :create)
+        can_add_groups: can_do(@context.groups.temp_record, @current_user, :create),
+        manage_user_notes: @context.root_account.enable_user_notes && @context.grants_right?(@current_user, :manage_user_notes)
       }
       if @context.root_account.feature_enabled?(:granular_permissions_manage_users)
         js_permissions[:can_allow_course_admin_actions] = manage_admins
@@ -139,6 +140,13 @@ class ContextController < ApplicationController
       if (course = @context.context.is_a?(Course) && @context.context)
         @secondary_users = { t("roster.teachers_and_tas", "Teachers & TAs") => course.participating_instructors.order_by_sortable_name.distinct }
       end
+    end
+
+    # Render upgraded People page if feature flag is enabled
+    if @domain_root_account.feature_enabled?(:react_people_page)
+      add_crumb t("People")
+      js_bundle :course_people
+      render html: "", layout: true
     end
 
     @secondary_users ||= {}
@@ -254,7 +262,6 @@ class ContextController < ApplicationController
 
       js_bundle :user_name, "context_roster_user"
       css_bundle :roster_user, :pairing_code
-      @google_analytics_page_title = "#{@context.name} People"
 
       if @domain_root_account.enable_profiles?
         @user_data = profile_data(
@@ -300,7 +307,7 @@ class ContextController < ApplicationController
                       quizzes rubrics wiki_pages rubric_associations_with_deleted].freeze
   ITEM_TYPES = WORKFLOW_TYPES + [:attachments, :all_group_categories].freeze
   def undelete_index
-    if authorized_action(@context, @current_user, :manage_content)
+    if authorized_action(@context, @current_user, [:manage_content, *RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS])
       @item_types =
         WORKFLOW_TYPES.each_with_object([]) do |workflow_type, item_types|
           if @context.class.reflections.key?(workflow_type.to_s)
@@ -321,7 +328,7 @@ class ContextController < ApplicationController
   end
 
   def undelete_item
-    if authorized_action(@context, @current_user, :manage_content)
+    if authorized_action(@context, @current_user, [:manage_content, :manage_course_content_add])
       type = params[:asset_string].split("_")
       id = type.pop
       type = type.join("_")

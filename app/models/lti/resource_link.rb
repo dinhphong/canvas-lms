@@ -28,7 +28,7 @@ class Lti::ResourceLink < ApplicationRecord
   validates :lookup_uuid, uniqueness: { scope: [:context_id, :context_type] }
 
   belongs_to :context_external_tool
-  belongs_to :context, polymorphic: %i[account assignment course]
+  belongs_to :context, polymorphic: %i[account assignment course group]
   belongs_to :root_account, class_name: "Account"
 
   alias_method :original_context_external_tool, :context_external_tool
@@ -43,12 +43,13 @@ class Lti::ResourceLink < ApplicationRecord
   before_validation :generate_lookup_uuid, on: :create
   before_save :set_root_account
 
-  def self.create_with(context, tool, custom_params = nil)
+  def self.create_with(context, tool, custom_params = nil, url = nil)
     return if context.nil? || tool.nil?
 
     context.lti_resource_links.create!(
       custom: Lti::DeepLinkingUtil.validate_custom_params(custom_params),
-      context_external_tool: tool
+      context_external_tool: tool,
+      url: url
     )
   end
 
@@ -62,22 +63,26 @@ class Lti::ResourceLink < ApplicationRecord
     ContextExternalTool.find_external_tool(
       original_context_external_tool.url || original_context_external_tool.domain,
       context,
-      original_context_external_tool.id
+      original_context_external_tool.id,
+      only_1_3: true
     )
   end
 
   def self.find_or_initialize_for_context_and_lookup_uuid(
-    context:, lookup_uuid:, custom: nil,
+    context:, lookup_uuid:, custom: nil, url: nil,
     context_external_tool: nil, context_external_tool_launch_url: nil
   )
     result = lookup_uuid.present? && context&.lti_resource_links&.find_by(lookup_uuid: lookup_uuid)
     result || context&.shard&.activate do
+      context_external_tool ||= ContextExternalTool.find_external_tool(
+        context_external_tool_launch_url, context, only_1_3: true
+      )
       new(
         context: context,
         custom: custom,
-        context_external_tool: context_external_tool ||
-          ContextExternalTool.find_external_tool(context_external_tool_launch_url, context),
-        lookup_uuid: lookup_uuid
+        context_external_tool: context_external_tool,
+        lookup_uuid: lookup_uuid,
+        url: url
       )
     end
   end

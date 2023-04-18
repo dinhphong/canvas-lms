@@ -73,6 +73,7 @@ module Lti::IMS
       :verify_required_params,
       :verify_valid_timestamp,
       :verify_valid_score_maximum,
+      :verify_valid_score_given,
       :verify_valid_submitted_at,
       :verify_valid_content_item_submission_type,
       :verify_attempts_for_online_upload
@@ -138,6 +139,9 @@ module Lti::IMS
     # @argument https://canvas.instructure.com/lti/submission[new_submission] [Optional, Boolean]
     #   (EXTENSION field) flag to indicate that this is a new submission. Defaults to true unless submission_type is none.
     #
+    # @argument https://canvas.instructure.com/lti/submission[prioritize_non_tool_grade] [Optional, Boolean]
+    #   (EXTENSION field) flag to prevent a request from overwriting an existing grade for a submission. Defaults to false.
+    #
     # @argument https://canvas.instructure.com/lti/submission[submission_type] [Optional, String]
     #   (EXTENSION field) permissible values are: none, basic_lti_launch, online_text_entry, external_tool, online_upload, or online_url. Defaults to external_tool. Ignored if content_items are provided.
     #
@@ -148,7 +152,7 @@ module Lti::IMS
     #   (EXTENSION field) Date and time that the submission was originally created. Should use ISO8601-formatted date with subsecond precision. This should match the data and time that the original submission happened in Canvas.
     #
     # @argument https://canvas.instructure.com/lti/submission[content_items] [Optional, Array]
-    #   (EXTENSION field) Files that should be included with the submission. Each item should contain `type: file`, a url pointing to the file, a title, and a progress url that Canvas can report to. If present, submission_type will be online_upload.
+    #   (EXTENSION field) Files that should be included with the submission. Each item should contain `type: file`, and a url pointing to the file. It can also contain a title, and an explicit MIME type if needed (otherwise, MIME type will be inferred from the title or url). If any items are present, submission_type will be online_upload.
     #
     # @returns resultUrl [String]
     #   The url to the result that was created.
@@ -175,7 +179,8 @@ module Lti::IMS
     #         {
     #           "type": "file",
     #           "url": "https://instructure.com/test_file.txt",
-    #           "title": "Submission File"
+    #           "title": "Submission File",
+    #           "media_type": "text/plain"
     #         }
     #       ]
     #     }
@@ -194,14 +199,52 @@ module Lti::IMS
     #         }
     #   }
     def create
+      ags_scores_multiple_files = @domain_root_account.feature_enabled?(:ags_scores_multiple_files)
+      return old_create unless ags_scores_multiple_files
+
+      json = {}
+      preflights_and_attachments = compute_preflights_and_attachments(
+        ags_scores_multiple_files: ags_scores_multiple_files
+      )
+      attachments = preflights_and_attachments.pluck(:attachment)
+      json[Lti::Result::AGS_EXT_SUBMISSION] = { content_items: preflights_and_attachments.pluck(:json) }
+
+      begin
+        upload_submission_files(preflights_and_attachments.pluck(:preflight_json))
+      rescue Net::ReadTimeout, CanvasHttp::CircuitBreakerError
+        return render_error("failed to communicate with file service", :gateway_timeout)
+      rescue CanvasHttp::InvalidResponseCodeError => e
+        if e.code == 502 || (e.code == 400 && e.body.include?("timed-out"))
+          return render_error("file url timed out", :gateway_timeout)
+        end
+
+        err_message = "uploading to file service failed with #{e.code}: #{e.body}"
+        return render_error(err_message, :bad_request) if e.code == 400
+
+        # 5xx and other unexpected errors
+        return render_error(err_message, :internal_server_error)
+      end
+
+      submit_homework(attachments) if new_submission?
+      update_or_create_result
+      json[:resultUrl] = result_url
+
+      render json: json, content_type: MIME_TYPE
+    end
+
+    private
+
+    def old_create
       submit_homework if new_submission? && !has_content_items?
       update_or_create_result
       json = { resultUrl: result_url }
 
+      preflights_and_attachments = compute_preflights_and_attachments
+      json[Lti::Result::AGS_EXT_SUBMISSION] = { content_items: preflights_and_attachments.pluck(:json) }
+
       if has_content_items?
         begin
-          content_items = upload_submission_files
-          json[Lti::Result::AGS_EXT_SUBMISSION] = { content_items: content_items }
+          upload_submission_files(preflights_and_attachments.pluck(:preflight_json))
         rescue Net::ReadTimeout, CanvasHttp::CircuitBreakerError
           return render_error("failed to communicate with file service", :gateway_timeout)
         rescue CanvasHttp::InvalidResponseCodeError => e
@@ -216,16 +259,15 @@ module Lti::IMS
       render json: json, content_type: MIME_TYPE
     end
 
-    private
-
     REQUIRED_PARAMS = %i[userId activityProgress gradingProgress timestamp].freeze
     OPTIONAL_PARAMS = %i[scoreGiven scoreMaximum comment].freeze
     EXTENSION_PARAMS = [
       :new_submission,
       :submission_type,
+      :prioritize_non_tool_grade,
       :submission_data,
       :submitted_at,
-      content_items: %i[type url title]
+      content_items: %i[type url title media_type]
     ].freeze
     SCORE_SUBMISSION_TYPES = %w[none basic_lti_launch online_text_entry online_url external_tool online_upload].freeze
     DEFAULT_SUBMISSION_TYPE = "external_tool"
@@ -291,6 +333,16 @@ module Lti::IMS
       end
     end
 
+    def verify_valid_score_given
+      return if ignore_score?
+
+      if params.key?(:scoreGiven)
+        return if params[:scoreGiven].to_f >= 0
+
+        render_error("ScoreGiven must be greater than or equal to 0", :unprocessable_entity)
+      end
+    end
+
     def verify_valid_content_item_submission_type
       if !has_content_items? && submission_type == "online_upload"
         render_error("Content items must be provided with submission type 'online_upload'", :unprocessable_entity)
@@ -312,12 +364,22 @@ module Lti::IMS
       render_error("The maximum number of allowed attempts has been reached for this submission", :unprocessable_entity)
     end
 
+    def prioritize_non_tool_grade?
+      ActiveRecord::Type::Boolean.new.cast(scores_params.dig(:extensions, Lti::Result::AGS_EXT_SUBMISSION, :prioritize_non_tool_grade))
+    end
+
+    def submission_has_score?
+      line_item.assignment.find_or_create_submission(user)&.score&.present?
+    end
+
     def score_submission
       return unless line_item.assignment_line_item?
 
       if ignore_score?
         submission = line_item.assignment.find_or_create_submission(user)
         submission.update(score: nil)
+      elsif prioritize_non_tool_grade? && submission_has_score?
+        submission = line_item.assignment.find_or_create_submission(user)
       else
         submission_hash = { grader_id: -tool.id }
         if line_item.assignment.grading_type == "pass_fail"
@@ -332,7 +394,7 @@ module Lti::IMS
       submission
     end
 
-    def submit_homework
+    def submit_homework(attachments = [])
       return unless line_item.assignment_line_item?
 
       submission_opts = { submitted_at: submitted_at }
@@ -343,6 +405,8 @@ module Lti::IMS
           submission_opts[:url] = submission_data
         when "online_text_entry"
           submission_opts[:body] = submission_data
+        when "online_upload"
+          submission_opts[:attachments] = attachments
         end
       end
 
@@ -360,47 +424,73 @@ module Lti::IMS
         else
           result.update!(scores_params.merge(updated_at: timestamp))
         end
+        # An update to a result might require updating a submission's workflow_state.
+        # The submission will infer that for us.
+        submission&.save!
       end
     end
 
-    def upload_submission_files
+    def compute_preflights_and_attachments(ags_scores_multiple_files: false)
+      # We defer submitting the assignment if the file error improvements flag is not on
+      #   When this feature flag is turned on, we will never submit the assignment,
+      #   and always precreate the attachment here
+      precreate_attachment = ags_scores_multiple_files
+      submit_assignment = !ags_scores_multiple_files
       file_content_items.map do |item|
         # Pt 1 of the file upload process, which for non-InstFS (ie local or open source) is all that's needed.
         # This upload will always be URL-only, so unless InstFS is enabled a job will be created to pull the
         # file from the given url.
-        preflight_json = api_attachment_preflight(
+        preflight = api_attachment_preflight(
           user,
           request,
           check_quota: false, # we don't check quota when uploading a file for assignment submission
           folder: user.submissions_folder(context), # organize attachment into the course submissions folder
           assignment: line_item.assignment,
-          submit_assignment: true,
+          submit_assignment: submit_assignment,
+          precreate_attachment: precreate_attachment,
           return_json: true,
           override_logged_in_user: true,
           override_current_user_with: user,
           params: {
             url: item[:url],
             name: item[:title],
+            content_type: item[:media_type]
           }
         )
+        # if we precreate the attachment, it gets returned with the json
+        preflight_json = precreate_attachment ? preflight[:json] : preflight
+        attachment = precreate_attachment ? preflight[:attachment] : nil
 
-        if preflight_json[:upload_url]
-          # Pt 2 of the file upload process, with InstFS enabled.
-          response = CanvasHttp.post(
-            preflight_json[:upload_url], form_data: preflight_json[:upload_params], multipart: true
-          )
-
-          if response.code.to_i != 201
-            raise CanvasHttp::InvalidResponseCodeError.new(response.code.to_i, response.body)
-          end
+        if submitted_at && ags_scores_multiple_files
+          # the file upload process uses the Progress#created_at for the homework submission time
+          Progress.find(preflight_json[:progress][:id]).update!(created_at: submitted_at)
         end
 
         {
-          type: item[:type],
-          url: item[:url],
-          title: item[:title],
-          progress: lti_progress_show_url(id: preflight_json[:progress][:id])
+          json: {
+            type: item[:type],
+            url: item[:url],
+            title: item[:title],
+            progress: lti_progress_show_url(id: preflight_json[:progress][:id])
+          },
+          preflight_json: preflight_json,
+          attachment: attachment
         }
+      end
+    end
+
+    def upload_submission_files(preflight_jsons = [])
+      preflight_jsons.map do |json|
+        next unless json[:upload_url]
+
+        # Pt 2 of the file upload process, with InstFS enabled.
+        response = CanvasHttp.post(
+          json[:upload_url], form_data: json[:upload_params], multipart: true
+        )
+
+        if response.code.to_i != 201
+          raise CanvasHttp::InvalidResponseCodeError.new(response.code.to_i, response.body)
+        end
       end
     end
 

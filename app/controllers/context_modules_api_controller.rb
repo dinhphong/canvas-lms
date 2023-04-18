@@ -162,7 +162,7 @@ class ContextModulesApiController < ApplicationController
       scope = ContextModule.search_by_attribute(scope, :name, params[:search_term]) unless includes.include?("items")
       modules = Api.paginate(scope, self, route)
 
-      ActiveRecord::Associations::Preloader.new.preload(modules, content_tags: :content) if includes.include?("items")
+      ActiveRecord::Associations.preload(modules, content_tags: :content) if includes.include?("items")
 
       modules_and_progressions = if @student
                                    modules.map { |m| [m, m.evaluate_for(@student)] }
@@ -212,14 +212,14 @@ class ContextModulesApiController < ApplicationController
     if authorized_action(@context, @current_user, :read)
       mod = @context.modules_visible_to(@student || @current_user).find(params[:id])
       includes = Array(params[:include])
-      ActiveRecord::Associations::Preloader.new.preload(mod, content_tags: :content) if includes.include?("items")
+      ActiveRecord::Associations.preload(mod, content_tags: :content) if includes.include?("items")
       prog = @student ? mod.evaluate_for(@student) : nil
       render json: module_json(mod, @student || @current_user, session, prog, includes)
     end
   end
 
   def duplicate
-    if authorized_action(@context, @current_user, :manage_content)
+    if authorized_action(@context, @current_user, [:manage_content, :manage_course_content_add])
       old_module = @context.modules_visible_to(@current_user).find(params[:module_id])
       return render json: { error: "unable to find module to duplicate" }, status: :bad_request unless old_module
       return render json: { error: "cannot duplicate this module" }, status: :bad_request unless old_module.can_be_duplicated?
@@ -269,7 +269,7 @@ class ContextModulesApiController < ApplicationController
   #      "completed": [1, 2]
   #    }
   def batch_update
-    if authorized_action(@context, @current_user, :manage_content)
+    if authorized_action(@context, @current_user, [:manage_content, :manage_course_content_edit])
       event = params[:event]
       return render(json: { message: "need to specify event" }, status: :bad_request) unless event.present?
       return render(json: { message: "invalid event" }, status: :bad_request) unless %w[publish unpublish delete].include? event

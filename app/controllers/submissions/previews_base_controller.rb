@@ -75,6 +75,8 @@ module Submissions
     def anonymize_students?
       if current_user_is_student?
         @submission_for_show.assignment.anonymous_peer_reviews? && @submission_for_show.submission.peer_reviewer?(@current_user)
+      elsif current_user_is_observing_submission_owner?
+        false
       else
         @submission_for_show.assignment.anonymize_students?
       end
@@ -86,12 +88,20 @@ module Submissions
       @context.user_is_student?(@current_user) && !@context.user_is_instructor?(@current_user)
     end
 
+    def current_user_is_observing_submission_owner?
+      @context_enrollment.present? && @current_user.present? && @context_enrollment.observer? && @submission_for_show.submission.observer?(@current_user)
+    end
+
     def redirect?
       redirect_to_quiz? || redirect_to_quiz_history?
     end
 
     def prepare_js_env
-      hash = { CONTEXT_ACTION_SOURCE: :submissions }
+      hash = {
+        CONTEXT_ACTION_SOURCE: :submissions,
+        EMOJIS_ENABLED: @context.feature_enabled?(:submission_comment_emojis),
+        EMOJI_DENY_LIST: @context.root_account.settings[:emoji_deny_list]
+      }
       append_sis_data(hash)
       js_env(hash)
     end

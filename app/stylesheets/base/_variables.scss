@@ -104,10 +104,8 @@ $ic-bg-light-success:       #E8F6E9;
 @if $use_high_contrast { $ic-bg-light-success: #E8F2E9; }
 $ic-bg-light-success-text:  #008A13;
 @if $use_high_contrast { $ic-bg-light-success-text: $ic-color-success; }
-$ic-bg-light-alert:         #FBEDE7;
-@if $use_high_contrast { $ic-bg-light-alert: #F9ECE8; }
-$ic-bg-light-alert-text:    #D14604;
-@if $use_high_contrast { $ic-bg-light-alert-text: $ic-color-alert; }
+$ic-bg-light-alert:         #F9ECE8;
+$ic-bg-light-alert-text:    #C23C0D;
 $ic-bg-light-danger:        #FCE8E7;
 @if $use_high_contrast { $ic-bg-light-danger: #FBE8E8; }
 $ic-bg-light-danger-text:   #E0061F;
@@ -202,7 +200,7 @@ $ic-font-color-dark:      var(--ic-brand-font-color-dark);
 @if $use_high_contrast { $ic-font-color-dark: $ic-color-dark; }
 $ic-font-color--subdued:  var(--ic-brand-font-color-dark-lightened-15);
 @if $use_high_contrast { $ic-font-color--subdued:  $ic-color-medium-darker; }
-$ic-hint-text:            var(--ic-brand-font-color-dark-lightened-30);
+$ic-hint-text:            var(--ic-brand-font-color-dark-lightened-28);
 @if $use_high_contrast { $ic-hint-text: $ic-color-medium; }
 
 // textColor is a deprecated Bootstrap 2 variable. Please use $ic-font-color-dark!
@@ -216,7 +214,7 @@ $ic-icon-link-color-hover: var(--ic-brand-font-color-dark-lightened-15);
 $ic-icon-link-color-hover: $ic-font-color-dark;
 }
 
-$ic-icon-link-color:       var(--ic-brand-font-color-dark-lightened-30);
+$ic-icon-link-color:       var(--ic-brand-font-color-dark-lightened-28);
 @if $use_high_contrast {
 $ic-icon-link-color:       lighten($ic-font-color-dark, 12%);
 }

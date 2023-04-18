@@ -129,8 +129,6 @@ class SubmissionsController < SubmissionsBaseController
     # via this controller's anonymous counterpart
     return render_unauthorized_action if @assignment.anonymous_peer_reviews? && @submission.peer_reviewer?(@current_user)
 
-    @google_analytics_page_title = "#{@assignment.title} Submission Details"
-
     super
   end
 
@@ -166,6 +164,8 @@ class SubmissionsController < SubmissionsBaseController
   #   used. For instance, to submit a URL, submission [submission_type] must be
   #   set to "online_url", otherwise the submission [url] parameter will be
   #   ignored.
+  #
+  #   "basic_lti_launch" requires the assignment submission_type "online" or "external_tool"
   #
   # @argument submission[body] [String]
   #   Submit the assignment as an HTML document snippet. Note this HTML snippet
@@ -226,7 +226,7 @@ class SubmissionsController < SubmissionsBaseController
 
     submit_at = params.dig(:submission, :submitted_at)
     user_sub = @assignment.submissions.find_by(user: user_id)
-    return if (user_id || submit_at) && !authorized_action(user_sub, @current_user, :grade)
+    return if (user_id || submit_at) && (!user_sub || !authorized_action(user_sub, @current_user, :grade))
 
     if @assignment.locked_for?(@submission_user) && !@assignment.grants_right?(@current_user, :update)
       flash[:notice] = t("errors.can_not_submit_locked_assignment", "You can't submit an assignment when it is locked")

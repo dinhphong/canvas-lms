@@ -22,10 +22,11 @@ module Lti::IMS::Concerns
     extend ActiveSupport::Concern
 
     CREATE_NEW_MODULE_PLACEMENTS = %w[course_assignments_menu module_index_menu_modal].freeze
-    ALLOW_LINE_ITEM_PLACEMENTS = %w[course_assignments_menu module_index_menu_modal assignment_selection link_selection].freeze
+    ALLOW_LINE_ITEM_PLACEMENTS = %w[course_assignments_menu module_index_menu_modal assignment_selection link_selection module_menu_modal].freeze
 
     def create_resources_from_content_items?
-      add_module_items? || add_assignment?
+      add_item_to_existing_module = return_url_parameters[:context_module_id].present?
+      create_new_module? || add_item_to_existing_module || add_assignment?
     end
 
     def add_assignment?
@@ -39,23 +40,13 @@ module Lti::IMS::Concerns
     def allow_line_items?
       return false unless @context.root_account.feature_enabled? :lti_deep_linking_line_items
 
-      ALLOW_LINE_ITEM_PLACEMENTS.include?(params[:placement])
-    end
-
-    def add_module_items?
-      return true if create_new_module?
-
-      add_item_to_existing_module? && lti_resource_links.length > 1
+      ALLOW_LINE_ITEM_PLACEMENTS.include?(return_url_parameters[:placement])
     end
 
     def create_new_module?
       return false unless @context.root_account.feature_enabled?(:lti_deep_linking_module_index_menu_modal)
 
-      CREATE_NEW_MODULE_PLACEMENTS.include?(params[:placement])
-    end
-
-    def add_item_to_existing_module?
-      params[:context_module_id].present?
+      CREATE_NEW_MODULE_PLACEMENTS.include?(return_url_parameters[:placement])
     end
 
     # the iframe property in a deep linking response can contain
@@ -98,27 +89,27 @@ module Lti::IMS::Concerns
       true
     end
 
-    def create_assignment!(content_item)
+    def create_update_assignment!(content_item, assignment_id = nil)
       Assignment.transaction do
-        assignment =
-          @context.assignments.create!(
-            {
-              submission_types: "external_tool",
-              title: content_item[:title],
-              description: content_item[:text],
-              points_possible: content_item.dig(:lineItem, :scoreMaximum),
-              unlock_at: content_item.dig(:available, :startDateTime),
-              lock_at: content_item.dig(:available, :endDateTime),
-              due_at: content_item.dig(:submission, :endDateTime),
-              workflow_state: "unpublished",
-              external_tool_tag_attributes: {
-                content_type: "ContextExternalTool",
-                content_id: tool.id,
-                new_tab: 0,
-                url: content_item[:url]
-              }
+        assignment = @context.assignments.active.find_by(id: assignment_id) if assignment_id
+        assignment ||= @context.assignments.new(workflow_state: "unpublished")
+        assignment.update!(
+          {
+            submission_types: "external_tool",
+            title: content_item[:title],
+            description: content_item[:text],
+            points_possible: content_item.dig(:lineItem, :scoreMaximum),
+            unlock_at: content_item.dig(:available, :startDateTime),
+            lock_at: content_item.dig(:available, :endDateTime),
+            due_at: content_item.dig(:submission, :endDateTime),
+            external_tool_tag_attributes: {
+              content_type: "ContextExternalTool",
+              content_id: tool.id,
+              new_tab: 0,
+              url: content_item[:url]
             }
-          )
+          }
+        )
 
         # make sure custom launch dimensions get to the ContentTag for launch from assignment
         assignment.external_tool_tag.update!(link_settings: launch_dimensions(content_item))

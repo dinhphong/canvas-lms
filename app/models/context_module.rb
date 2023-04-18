@@ -92,7 +92,9 @@ class ContextModule < ActiveRecord::Base
       progression_scope = progression_scope.where(user_id: student_ids) if student_ids
 
       if progression_scope.update_all(["workflow_state = 'locked', lock_version = lock_version + 1, current = ?", false]) > 0
-        delay_if_production(strand: "module_reeval_#{global_context_id}").evaluate_all_progressions
+        delay_if_production(n_strand: ["evaluate_module_progressions", global_context_id],
+                            singleton: "evaluate_module_progressions:#{global_id}")
+          .evaluate_all_progressions
       end
 
       context.context_modules.each do |mod|
@@ -105,10 +107,14 @@ class ContextModule < ActiveRecord::Base
     self.class.connection.after_transaction_commit do
       if context_module_progressions.where(current: true).update_all(current: false) > 0
         # don't queue a job unless necessary
-        delay_if_production(strand: "module_reeval_#{global_context_id}").evaluate_all_progressions
+        delay_if_production(n_strand: ["evaluate_module_progressions", global_context_id],
+                            singleton: "evaluate_module_progressions:#{global_id}")
+          .evaluate_all_progressions
       end
       @discussion_topics_to_recalculate&.each do |dt|
-        dt.delay_if_production(strand: "module_reeval_#{global_context_id}").recalculate_context_module_actions!
+        dt.delay_if_production(n_strand: ["evaluate_discussion_topic_progressions", global_context_id],
+                               singleton: "evaluate_discussion_topic_progressions:#{dt.global_id}")
+          .recalculate_context_module_actions!
       end
     end
   end
@@ -345,6 +351,7 @@ class ContextModule < ActiveRecord::Base
   alias_method :published?, :active?
 
   def publish_items!
+    enable_publish_at = context.root_account.feature_enabled?(:scheduled_page_publication)
     content_tags.each do |tag|
       if tag.unpublished?
         if tag.content_type == "Attachment"
@@ -352,7 +359,7 @@ class ContextModule < ActiveRecord::Base
           tag.content.save!
           tag.publish if tag.content.published?
         else
-          tag.publish
+          tag.publish unless enable_publish_at && tag.content.respond_to?(:publish_at) && tag.content.publish_at
         end
       end
       tag.update_asset_workflow_state!
@@ -360,8 +367,31 @@ class ContextModule < ActiveRecord::Base
   end
 
   set_policy do
-    given { |user, session| context.grants_right?(user, session, :manage_content) }
+    #################### Begin legacy permission block #########################
+    given do |user, session|
+      user && !context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_content)
+    end
     can :read and can :create and can :update and can :delete and can :read_as_admin
+    ##################### End legacy permission block ##########################
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_course_content_add)
+    end
+    can :read and can :read_as_admin and can :create
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_course_content_edit)
+    end
+    can :read and can :read_as_admin and can :update
+
+    given do |user, session|
+      user && context.root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context.grants_right?(user, session, :manage_course_content_delete)
+    end
+    can :read and can :read_as_admin and can :delete
 
     given { |user, session| context.grants_right?(user, session, :read_as_admin) }
     can :read and can :read_as_admin
@@ -699,7 +729,8 @@ class ContextModule < ActiveRecord::Base
             context: context,
             lookup_uuid: params[:lti_resource_link_lookup_uuid].presence,
             custom: Lti::DeepLinkingUtil.validate_custom_params(params[:custom_params]),
-            context_external_tool: content
+            context_external_tool: content,
+            url: params[:url]
           )
       end
     when "context_module_sub_header", "sub_header"
@@ -855,16 +886,12 @@ class ContextModule < ActiveRecord::Base
     progression = nil
     shard.activate do
       GuardRail.activate(:primary) do
-        progression = context_module_progressions.where(user_id: user).first
-        if !progression && context.enrollments.except(:preload).where(user_id: user).exists? # check if we should even be creating a progression for this user
-          self.class.unique_constraint_retry do |retry_count|
-            progression = context_module_progressions.where(user_id: user).first if retry_count > 0
-            progression ||= context_module_progressions.create!(user: user)
-          end
+        if context.enrollments.except(:preload).where(user_id: user).exists?
+          progression = ContextModuleProgression.create_and_ignore_on_duplicate(user: user, context_module: self)
+          progression ||= context_module_progressions.where(user_id: user).first
         end
       end
     end
-    progression.context_module = self if progression
     progression
   end
 

@@ -338,10 +338,20 @@
 #           "example": "false",
 #           "type": "boolean"
 #         },
+#         "diffing_threshold_exceeded": {
+#           "description": "Whether a diffing job failed because the threshold limit got exceeded.",
+#           "example": "true",
+#           "type": "boolean"
+#         },
 #         "diffing_data_set_identifier": {
 #           "description": "The identifier of the data set that this SIS batch diffs against",
 #           "example": "account-5-enrollments",
 #           "type": "string"
+#         },
+#         "diffing_remaster": {
+#           "description": "Whether diffing remaster data was enabled.",
+#           "example": "false",
+#           "type": "boolean"
 #         },
 #         "diffed_against_import_id": {
 #           "description": "The ID of the SIS Import that this import was diffed against",
@@ -471,6 +481,10 @@ class SisImportsApiController < ApplicationController
   #         -H "Authorization: Bearer <token>" \
   #         https://<canvas>/api/v1/accounts/<account_id>/sis_imports.json?import_type=instructure_csv&batch_mode=1&batch_mode_term_id=15
   #
+  #   If the attachment is a zip file, the uncompressed file(s) cannot be 100x larger than the zip, or the import will fail.
+  #   For example, if the zip file is 1KB but the total size of the uncompressed file(s) is 100KB or greater the import will
+  #   fail. There is a hard cap of 50 GB.
+  #
   # @argument extension [String]
   #   Recommended for raw post request style imports. This field will be used to
   #   distinguish between zip, xml, csv, and other file format extensions that
@@ -495,11 +509,8 @@ class SisImportsApiController < ApplicationController
   #   objects that are deleted during the batch mode cleanup process.
   #
   # @argument override_sis_stickiness [Boolean]
-  #   Many fields on records in Canvas can be marked "sticky," which means that
-  #   when something changes in the UI apart from the SIS, that field gets
-  #   "stuck." In this way, by default, SIS imports do not override UI changes.
-  #   If this field is present, however, it will tell the SIS import to ignore
-  #   "stickiness" and override all fields.
+  #   Default is true. If false, any fields containing “sticky” changes will not be updated.
+  #   See SIS CSV Format documentation for information on which fields can have SIS stickiness
   #
   # @argument add_sis_stickiness [Boolean]
   #   This option, if present, will process all changes as if they were UI
@@ -585,6 +596,7 @@ class SisImportsApiController < ApplicationController
           @content_type = content_type
         end
 
+        # rubocop:disable Style/TrivialAccessors not a Class
         def file_obj.content_type
           @content_type
         end
@@ -592,6 +604,7 @@ class SisImportsApiController < ApplicationController
         def file_obj.original_filename
           @original_filename
         end
+        # rubocop:enable Style/TrivialAccessors not a Class
 
         if params[:extension]
           file_obj.set_file_attributes("sis_import.#{params[:extension]}",
@@ -644,7 +657,7 @@ class SisImportsApiController < ApplicationController
           end
         elsif params[:diffing_data_set_identifier].present?
           batch.enable_diffing(params[:diffing_data_set_identifier],
-                               remaster: value_to_boolean(params[:diffing_remaster_data_set]))
+                               value_to_boolean(params[:diffing_remaster_data_set]))
         end
 
         batch.options[:skip_deletes] = value_to_boolean(params[:skip_deletes])

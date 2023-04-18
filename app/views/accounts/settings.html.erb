@@ -21,7 +21,6 @@
   provide :page_title, t(:page_title, "Account Settings")
 
   js_env(
-    :PRODUCTION => Rails.env.production?,
     :ACCOUNT => {
       'id' => @context.id,
       'site_admin' => @account.site_admin?,
@@ -86,6 +85,9 @@
     <% if can_do(@context, @current_user, :view_feature_flags) %>
       <li><a href="#tab-features" id="tab-features-link"><%= t("Feature Options") %></a></li>
     <% end %>
+    <% if @account.site_admin? && can_do(@context, @current_user, :manage_internal_settings) %>
+      <li><a href="#tab-internal-settings" id="tab-internal-settings-link"><%= t("Internal Settings") %></a></li>
+    <% end %>
     <% if @account.root_account.feature_enabled?(:javascript_csp) && can_do(@context, @current_user, :manage_account_settings) && !@account.site_admin? %>
       <li><a href="#tab-security" id="tab-security-link"><%= t("Security") %></a></li>
     <% end %>
@@ -124,9 +126,24 @@
                              [[no_language, nil]] + available_locales.invert.sort_by { |desc, _| Canvas::ICU.collation_key(desc) },
                              {:selected => @context.default_locale}, {:class => 'locale'} %>
                 <%= render :partial => 'shared/locale_warning' %>
-                <p style="font-size: 0.9em;"><%= t(:default_language_description, "This will override any browser/OS language settings. Preferred languages can still be set at the course/user level.") %></p>
+                <p class="aside"><%= t(:default_language_description, "This will override any browser/OS language settings. Preferred languages can still be set at the course/user level.") %></p>
               </td>
             </tr>
+            <% end %>
+            <% if !@account.site_admin? && @account.root_account.feature_enabled?(:default_due_time) %>
+              <%= f.fields_for :settings do |settings| %>
+                <%= settings.fields_for :default_due_time do |ddt| %>
+                  <tr>
+                    <td><%= ddt.blabel :value, t("Default Due Time") %></td>
+                    <td>
+                        <%= ddt.select :value, options_for_select(default_due_time_options(@account), default_due_time_key(@account)) %>
+                        <p class="aside">
+                          <%= t("This influences the user interface for setting due dates. It does not change the time due for any existing assignments.") %>
+                        </p>
+                    </td>
+                  </tr>
+                 <% end %>
+              <% end %>
             <% end %>
             <% if @account.primary_settings_root_account? %>
               <tr>
@@ -176,7 +193,7 @@
                                               :value => @account.settings[:trusted_referers],
                                               :class => 'same-width-as-select',
                                               :placeholder => "https://example.edu" %>
-                      <p style="font-size: 0.9em;"><%= t("This is a comma separated list of URL's to trust.  Trusting any URL's in this list will bypass the CSRF token when logging in to Canvas.") %></p>
+                      <p class="aside"><%= t("This is a comma separated list of URL's to trust.  Trusting any URL's in this list will bypass the CSRF token when logging in to Canvas.") %></p>
                     </td>
                   </tr>
 
@@ -185,7 +202,7 @@
                       <td><%= settings.blabel :default_dashboard_view, t("Default View for Dashboard") %></td>
                       <td>
                         <%= settings.select :default_dashboard_view, options_for_select(dashboard_view_options, @account.default_dashboard_view) %>
-                        <p style="font-size: 0.9em;"><%= settings.check_box :force_default_dashboard_view, :checked => false %>  <%= settings.label :force_default_dashboard_view, t("Overwrite all users' existing default dashboard preferences") %></p>
+                        <p class="aside"><%= settings.check_box :force_default_dashboard_view, :checked => false %>  <%= settings.label :force_default_dashboard_view, t("Overwrite all users' existing default dashboard preferences") %></p>
                       </td>
                     </tr>
                   <% end %>
@@ -245,7 +262,7 @@
                   <% disabled = hash[:locked] && hash[:inherited] %>
                   <tr class="future_listing">
                     <td colspan="2"><%= r.check_box :value, :checked => hash[:value], :disabled => disabled %>
-                      <%= r.label :restrict_student_future_listing, :en => "Restrict students from viewing future courses in enrollments list" %>
+                      <%= r.label :value, t("Restrict students from viewing future courses in enrollments list") %>
                     </td>
                   </tr>
                   <% unless disabled %>
@@ -281,6 +298,24 @@
                   <tr>
                     <td colspan="2"><%= r.check_box :value, :checked => hash[:value], :disabled => disabled %>
                       <%= r.label :value, :en => "Disable comments on announcements" %>
+                    </td>
+                  </tr>
+                  <% unless disabled %>
+                    <tr>
+                      <td colspan="2" class="sub_checkbox">
+                        <%= r.check_box :locked, :checked => hash[:locked] %>
+                        <%= r.label :locked, :en => "Lock this setting for sub-accounts and courses" %>
+                      </td>
+                    </tr>
+                  <% end %>
+                <% end %>
+
+                <%= settings.fields_for :conditional_release do |r| %>
+                  <% hash = @account.conditional_release %>
+                  <% disabled = hash[:locked] && hash[:inherited] %>
+                  <tr>
+                    <td colspan="2"><%= r.check_box :value, :checked => hash[:value], :disabled => disabled %>
+                      <%= r.label :value, t("Mastery Paths") %>
                     </td>
                   </tr>
                   <% unless disabled %>
@@ -341,6 +376,12 @@
                     </td>
                   </tr>
                 <% end %>
+                  <tr>
+                    <td colspan="2">
+                      <%= settings.check_box :allow_additional_email_at_registration, checked: @account.allow_additional_email_at_registration? %>
+                      <%= settings.label :allow_additional_email_at_registration, t("Allow users to submit an additional email at registration.") %>
+                    </td>
+                  </tr>
               <% end %>
             <% end %>
           </table>
@@ -625,7 +666,12 @@
                   <%= settings.label     :enable_push_notifications, :en => "Enable push notifications to mobile devices" %>
                 </div>
               <% end %>
-
+              <% unless @account.site_admin? %>
+                <div>
+                  <%= settings.check_box :kill_joy, :checked => @account.kill_joy? %>
+                  <%= settings.label     :kill_joy, :en => "Remove hidden game from 404 page" %>
+                </div>
+              <% end %>
             <% end %>
             <% unless @account.site_admin? %>
               <div>
@@ -647,7 +693,7 @@
                 <%= services.check_box key, :checked => @account.service_enabled?(key) %>
                 <%= services.label key, service[:name] + " " %>
               </div>
-              <% if key == :avatars %>
+              <% if key == :avatars && @account.primary_settings_root_account? %>
                 <div id="account_settings_gravatar_checkbox">
                   <%= hidden_field_tag "account[settings][enable_gravatar]", "0", id: "hidden_account_settings_enable_gravatar" %>
                   <%= check_box_tag "account[settings][enable_gravatar]", "1", @account.enable_gravatar? %>
@@ -751,6 +797,13 @@
               </table>
             </fieldset>
           <% end %>
+        <% end %>
+
+        <% if !@account.site_admin? &&
+            @account.primary_settings_root_account? &&
+            @account.feature_allowed?(:submission_comment_emojis) &&
+            @account.grants_right?(@current_user, :manage_account_settings) %>
+            <div id="emoji-deny-list"></div>
         <% end %>
 
         <% if @account.primary_settings_root_account? and not (exposed_services = Account.services_exposed_to_ui_hash(:service, @current_user)).empty? %>
@@ -901,11 +954,6 @@ acknowledge that you have read and agreed to the
           }) do |f|
       %>
         <%= f.fields_for :settings do |settings| %>
-          <div>
-            <%= settings.check_box :enable_google_analytics, checked: @account.settings.fetch(:enable_google_analytics, true) %>
-            <%= settings.label :enable_google_analytics, en: "Allow tracking with Google Analytics" %>
-          </div>
-
           <div>
             <%= settings.check_box :enable_fullstory, checked: @account.settings.fetch(:enable_fullstory, true) %>
             <%= settings.label :enable_fullstory, en: "Allow tracking with FullStory" %>
@@ -1386,5 +1434,8 @@ acknowledge that you have read and agreed to the
   <% end %>
   <% if @account.root_account.feature_enabled?(:javascript_csp) && can_do(@context, @current_user, :manage_account_settings) && !@account.site_admin? %>
     <div id="tab-security"></div>
+  <% end %>
+  <% if @account.site_admin? && can_do(@context, @current_user, :manage_internal_settings) %>
+    <div id="tab-internal-settings"></div>
   <% end %>
 </div>

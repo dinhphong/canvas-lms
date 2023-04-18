@@ -35,10 +35,10 @@ module ContextModulesHelper
     WikiPage: I18n.t("Page")
   }.freeze
 
-  def cache_if_module(context_module, editable, is_student, can_view_unpublished, user, context, &block)
+  def cache_if_module(context_module, viewable, is_student, can_view_unpublished, user, context, &block)
     if context_module
       visible_assignments = user ? user.assignment_and_quiz_visibilities(context) : []
-      cache_key_items = ["context_module_render_21_", context_module.cache_key, editable, is_student, can_view_unpublished,
+      cache_key_items = ["context_module_render_22_", context_module.cache_key, viewable, is_student, can_view_unpublished,
                          true, Time.zone, Digest::MD5.hexdigest([visible_assignments, @section_visibility].join("/"))]
       cache_key = cache_key_items.join("/")
       cache_key = add_menu_tools_to_cache_key(cache_key)
@@ -51,7 +51,6 @@ module ContextModulesHelper
 
   def add_menu_tools_to_cache_key(cache_key)
     tool_key = @menu_tools ? @menu_tools.values.flatten.map(&:cache_key).join("/") : ""
-    tool_key += @module_group_tools.to_s if @module_group_tools.present?
     cache_key += Digest::MD5.hexdigest(tool_key) if tool_key.present?
     # should leave it alone if there are no tools
     cache_key
@@ -59,12 +58,14 @@ module ContextModulesHelper
 
   def add_mastery_paths_to_cache_key(cache_key, context, user)
     if user && cyoe_enabled?(context)
-      rules = if context.user_is_student?(user)
-                cyoe_rules(context, user, @session)
-              else
-                ConditionalRelease::Service.active_rules(context, user, @session)
-              end
-      cache_key += "/mastery:" + Digest::MD5.hexdigest(rules.to_s)
+      if context.user_is_student?(user)
+        rules = cyoe_rules(context, user, @session)
+        cache_key += "/mastery:" + Digest::MD5.hexdigest(rules.to_s)
+        cache_key += "/mastery_actions:" + Digest::MD5.hexdigest(assignment_set_action_ids(rules, user).to_s)
+      else
+        rules = ConditionalRelease::Service.active_rules(context, user, @session)
+        cache_key += "/mastery:" + Digest::MD5.hexdigest(rules.to_s)
+      end
     end
     cache_key
   end
@@ -99,6 +100,10 @@ module ContextModulesHelper
     item.content.can_publish?
   end
 
+  def module_item_publish_at(item)
+    (item&.content.respond_to?(:publish_at) && item.content.publish_at&.iso8601) || nil
+  end
+
   def prerequisite_list(prerequisites)
     prerequisites.pluck(:name).join(", ")
   end
@@ -109,9 +114,9 @@ module ContextModulesHelper
     item.content.can_unpublish?
   end
 
-  def preload_modules_content(modules, can_edit)
-    ActiveRecord::Associations::Preloader.new.preload(modules, content_tags: :content)
-    preload_can_unpublish(@context, modules) if can_edit
+  def preload_modules_content(modules)
+    ActiveRecord::Associations.preload(modules, content_tags: :content)
+    preload_can_unpublish(@context, modules) if @can_view
   end
 
   def process_module_data(mod, is_student = false, current_user = nil, session = nil)

@@ -37,13 +37,36 @@ class ContextExternalTool < ActiveRecord::Base
   validates :context_id, :context_type, :workflow_state, presence: true
   validates :name, :consumer_key, :shared_secret, presence: true
   validates :name, length: { maximum: maximum_string_length }
+  validates :consumer_key, length: { maximum: 2048 }
   validates :config_url, presence: { if: ->(t) { t.config_type == "by_url" } }
   validates :config_xml, presence: { if: ->(t) { t.config_type == "by_xml" } }
   validates :domain, length: { maximum: 253, allow_blank: true }
+  validates :lti_version, inclusion: { in: %w[1.1 1.3], message: "%{value} is not a valid LTI version" }
   validate :url_or_domain_is_set
   validate :validate_urls
-  serialize :settings
   attr_reader :config_type, :config_url, :config_xml
+
+  # handles both serialized Hashes and HashWithIndifferentAccesses
+  # and always returns a HashWithIndifferentAccess
+  #
+  # would LOVE to rip this out and not store everything in `settings`
+  class SettingsSerializer
+    def self.load(value)
+      return nil unless value
+
+      obj = YAML.safe_load(value)
+      if obj.respond_to? :with_indifferent_access
+        return obj.with_indifferent_access
+      end
+
+      obj
+    end
+
+    def self.dump(value)
+      YAML.dump(value)
+    end
+  end
+  serialize :settings, SettingsSerializer
 
   # add_identity_hash needs to calculate off of other data in the object, so it
   # should always be the last field change callback to run
@@ -112,7 +135,7 @@ class ContextExternalTool < ActiveRecord::Base
         batch_object: user, batched_keys: [:enrollments, :account_users]
       ) do
         # let them see admin level tools if there are any courses they can manage
-        if root_account.grants_right?(user, :manage_content) ||
+        if root_account.grants_any_right?(user, :manage_content, *RoleOverride::GRANULAR_MANAGE_COURSE_CONTENT_PERMISSIONS) ||
            GuardRail.activate(:secondary) { Course.manageable_by_user(user.id, false).not_deleted.where(root_account_id: root_account).exists? }
           "admins"
         else
@@ -216,7 +239,7 @@ class ContextExternalTool < ActiveRecord::Base
 
     def all_global_navigation_tools(root_account)
       RequestCache.cache("global_navigation_tools", root_account) do # prevent re-querying
-        root_account.context_external_tools.active.having_setting(:global_navigation).to_a
+        Lti::ContextToolFinder.new(root_account, type: :global_navigation).all_tools_scope_union.to_unsorted_array
       end
     end
 
@@ -304,6 +327,7 @@ class ContextExternalTool < ActiveRecord::Base
       selection_height
       selection_width
       text
+      labels
       windowTarget
       url
       target_link_uri
@@ -366,11 +390,12 @@ class ContextExternalTool < ActiveRecord::Base
   end
 
   def has_placement?(type)
-    # Only LTI 1.0 tools (no developer key) support default placements
+    # Only LTI 1.1 tools support default placements
     # (LTI 2 tools also, but those are not handled by this class)
-    if developer_key_id.blank? &&
-       Lti::ResourcePlacement::LEGACY_DEFAULT_PLACEMENTS.include?(type.to_s)
-      !!(selectable && (domain || url))
+    if lti_version == "1.1" &&
+       Lti::ResourcePlacement::LEGACY_DEFAULT_PLACEMENTS.include?(type.to_s) &&
+       !!(selectable && (domain || url))
+      true
     else
       context_external_tool_placements.to_a.any? { |p| p.placement_type == type.to_s }
     end
@@ -436,7 +461,7 @@ class ContextExternalTool < ActiveRecord::Base
   private :validate_url
 
   def settings
-    read_or_initialize_attribute(:settings, {})
+    read_or_initialize_attribute(:settings, {}.with_indifferent_access)
   end
 
   def label_for(key, lang = nil)
@@ -548,11 +573,11 @@ class ContextExternalTool < ActiveRecord::Base
   end
 
   def use_1_3?
-    settings.fetch(:use_1_3, settings["use_1_3"])
+    lti_version == "1.3"
   end
 
   def use_1_3=(bool)
-    settings[:use_1_3] = bool
+    self.lti_version = bool ? "1.3" : "1.1"
   end
 
   def uses_preferred_lti_version?
@@ -638,7 +663,11 @@ class ContextExternalTool < ActiveRecord::Base
 
   def login_or_launch_url(extension_type: nil, content_tag_uri: nil)
     (use_1_3? && developer_key&.oidc_initiation_url) ||
-      content_tag_uri ||
+      launch_url(extension_type: extension_type, content_tag_uri: content_tag_uri)
+  end
+
+  def launch_url(extension_type: nil, content_tag_uri: nil)
+    content_tag_uri ||
       (use_1_3? && extension_setting(extension_type, :target_link_uri)) ||
       extension_setting(extension_type, :url) ||
       url
@@ -832,7 +861,12 @@ class ContextExternalTool < ActiveRecord::Base
     return true if url.present? && duplicate_tool.present?
 
     # If tool with same domain is found in the context
-    self.class.all_tools_for(context).where.not(id: id).where(domain: domain).present? && domain.present?
+    if domain.present?
+      same_domain_diff_id = ContextExternalTool.where.not(id: id).where(domain: domain)
+      Lti::ContextToolFinder.all_tools_scope_union(context, base_scope: same_domain_diff_id).exists?
+    else
+      false
+    end
   end
 
   def check_for_duplication(verify_uniqueness)
@@ -879,39 +913,34 @@ class ContextExternalTool < ActiveRecord::Base
     ) || tag.content
   end
 
-  def self.contexts_to_search(context)
+  def self.contexts_to_search(context, include_federated_parent: false)
     case context
     when Course
-      [context] + context.account_chain
+      [:self, :account_chain]
     when Group
-      [context] + (context.context ? contexts_to_search(context.context) : context.account_chain)
+      if context.context
+        [:self, :recursive]
+      else
+        [:self, :account_chain]
+      end
     when Account
-      context.account_chain
+      [:account_chain]
     when Assignment
-      contexts_to_search(context.context)
+      [:recursive]
     else
       []
-    end
-  end
-
-  def self.all_tools_for(context, options = {})
-    placements = * options[:placements] || options[:type]
-    contexts = []
-    if options[:user]
-      contexts << options[:user]
-    end
-    contexts.concat contexts_to_search(context)
-    return nil if contexts.empty?
-
-    context.shard.activate do
-      scope = ContextExternalTool.shard(context.shard).where(context: contexts).active
-      scope = scope.placements(*placements)
-      scope = scope.selectable if Canvas::Plugin.value_to_boolean(options[:selectable])
-      scope = scope.where(tool_id: options[:tool_ids]) if options[:tool_ids].present?
-      if Canvas::Plugin.value_to_boolean(options[:only_visible])
-        scope = scope.visible(options[:current_user], context, options[:session], options[:visibility_placements], scope)
+    end.flat_map do |component|
+      case component
+      when :self
+        context
+      when :recursive
+        contexts_to_search(context.context, include_federated_parent: include_federated_parent)
+      when :account_chain
+        inc_fp = include_federated_parent &&
+                 Account.site_admin.feature_enabled?(:lti_tools_from_federated_parents) &&
+                 !context.root_account.primary_settings_root_account?
+        context.account_chain(include_federated_parent: inc_fp)
       end
-      scope.order(ContextExternalTool.best_unicode_collation_key("context_external_tools.name")).order(Arel.sql("context_external_tools.id"))
     end
   end
 
@@ -941,53 +970,45 @@ class ContextExternalTool < ActiveRecord::Base
   # the teacher).
   #
   # Tools with exclude_tool_id as their ID will never be returned.
-  def self.find_external_tool(url, context, preferred_tool_id = nil, exclude_tool_id = nil, preferred_client_id = nil)
+  def self.find_external_tool(
+    url,
+    context,
+    preferred_tool_id = nil, exclude_tool_id = nil, preferred_client_id = nil,
+    only_1_3: false
+  )
     GuardRail.activate(:secondary) do
-      contexts = contexts_to_search(context)
       preferred_tool = ContextExternalTool.active.where(id: preferred_tool_id).first if preferred_tool_id
-      can_use_preferred_tool = preferred_tool && contexts.member?(preferred_tool.context)
+      can_use_preferred_tool = preferred_tool && contexts_to_search(context).member?(preferred_tool.context)
 
       # always use the preferred_tool_id if url isn't provided
       return preferred_tool if url.blank? && can_use_preferred_tool
       return nil unless url
 
-      all_external_tools = context.shard.activate do
-        query = ContextExternalTool.where(context: contexts).active
-        query = query.where(developer_key_id: preferred_client_id) if preferred_client_id
-        query.to_a
-      end
-
-      sorted_external_tools = all_external_tools.sort_by do |t|
-        [contexts.index { |c| c.id == t.context_id && c.class.polymorphic_name == t.context_type }, t.precedence, t.id == preferred_tool_id ? CanvasSort::First : CanvasSort::Last]
-      end
-
-      search_options = { exclude_tool_id: exclude_tool_id }
+      sorted_external_tools = find_and_order_tools(
+        context,
+        preferred_tool_id, exclude_tool_id, preferred_client_id,
+        only_1_3: only_1_3
+      )
 
       # Check for a tool that exactly matches the given URL
       match = find_tool_match(
-        url,
         sorted_external_tools,
-        ->(t, u) { t.matches_url?(u) },
-        ->(t) { t.url.present? },
-        search_options
+        ->(t) { t.matches_url?(url) },
+        ->(t) { t.url.present? }
       )
 
       # If exactly match doesn't work, try to match by ignoring extra query parameters
       match ||= find_tool_match(
-        url,
         sorted_external_tools,
-        ->(t, u) { t.matches_url?(u, false) },
-        ->(t) { t.url.present? },
-        search_options
+        ->(t) { t.matches_url?(url, false) },
+        ->(t) { t.url.present? }
       )
 
       # If still no matches, use domain matching to try to find a tool
       match ||= find_tool_match(
-        url,
         sorted_external_tools,
-        ->(t, _u) { t.matches_tool_domain?(url) },
-        ->(t) { t.domain.present? },
-        search_options
+        ->(t) { t.matches_tool_domain?(url) },
+        ->(t) { t.domain.present? }
       )
 
       # always use the preferred tool id *unless* the preferred tool is a 1.1 tool
@@ -1004,36 +1025,93 @@ class ContextExternalTool < ActiveRecord::Base
     end
   end
 
-  # Given a collection of tools, finds the first tool that exactly
-  # matches the given URL.
+  # Sorts all tools in the context chain by a variety of criteria in SQL
+  # as opposed to in memory, in order to make it easier to find a tool that matches
+  # the given URL.
   #
-  # If a preferred LTI version is specified, this method will use
-  # LTI version as a tie-breaker.
-  def self.find_tool_match(url, sorted_tool_collection, matcher, matcher_condition, opts)
-    exclude_tool_id = opts[:exclude_tool_id]
+  # Criteria:
+  # * closer contexts preferred (Course over Account over Root Account etc)
+  # * more specific subdomains preferred (sub.domain.instructure.com over instructure.com)
+  # * LTI 1.3 tools preferred over 1.1 tools
+  # * if preferred_tool_id is provided, moves that tool to the front
+  # * if preferred_client_id is provided, only retrieves tools that came from that developer key
+  # * if exclude_tool_id is provided, does not retrieve that tool
+  #
+  # Theoretically once this method is done, the very first tool to match the URL will be
+  # the right tool, making it possible to eventually perform the rest of the URL matching
+  # in SQL as well.
+  def self.find_and_order_tools(
+    context,
+    preferred_tool_id, exclude_tool_id, preferred_client_id,
+    only_1_3: false
+  )
+    context.shard.activate do
+      contexts = contexts_to_search(context)
+      context_order = contexts.map.with_index { |c, i| "(#{c.id},'#{c.class.polymorphic_name}',#{i})" }.join(",")
 
-    # Find tools that match the given matcher
-    exact_matches = sorted_tool_collection.select do |tool|
-      matcher_condition.call(tool) && matcher.call(tool, url) && tool.id != exclude_tool_id
+      order_clauses = [
+        # prefer 1.3 tools
+        sort_by_sql_string("lti_version = '1.3'"),
+        # prefer tools that are not duplicates
+        sort_by_sql_string("identity_hash != 'duplicate'"),
+        # prefer tools from closer contexts
+        "context_order.ordering",
+        # prefer tools with more subdomains
+        precedence_sql_string
+      ]
+      # move preferred tool to the front when requested, and only if the id
+      # is in an actual id format
+      if preferred_tool_id && Shard.integral_id_for(preferred_tool_id)
+        order_clauses << sort_by_sql_string("#{quoted_table_name}.id = #{preferred_tool_id}")
+      end
+
+      query = ContextExternalTool.where(context: contexts).active
+      query = query.where(lti_version: "1.3") if only_1_3
+      query = query.where(developer_key_id: preferred_client_id) if preferred_client_id
+      query = query.where.not(id: exclude_tool_id) if exclude_tool_id
+
+      query.joins(sanitize_sql("INNER JOIN (values #{context_order}) as context_order (context_id, class, ordering)
+        ON #{quoted_table_name}.context_id = context_order.context_id AND #{quoted_table_name}.context_type = context_order.class"))
+           .order(Arel.sql(sanitize_sql_for_order(order_clauses.join(","))))
     end
-
-    # There was only a single match, so return it
-    return exact_matches.first if exact_matches.count == 1
-
-    version_match = find_exact_version_match(exact_matches)
-
-    # There is no LTI version preference or no matching
-    # version was found. Return the first matched tool
-    return exact_matches.first if version_match.blank?
-
-    # An LTI version is preferred and found, return it
-    version_match
   end
 
-  # Given a collection of tools, finds the first with the given LTI version
-  # If no matches were detected, returns nil
-  def self.find_exact_version_match(sorted_tool_collection)
-    sorted_tool_collection.find(&:uses_preferred_lti_version?)
+  # replicates the ContextExternalTool.precedence method, in SQL for an order clause.
+  # prefer tools that have more specific subdomains
+  def self.precedence_sql_string
+    <<~SQL.squish
+      CASE WHEN domain IS NOT NULL
+        THEN 25 - ARRAY_LENGTH(STRING_TO_ARRAY(domain, '.'), 1)
+        ELSE CASE WHEN url IS NOT NULL
+          THEN 25
+          ELSE 26
+        END
+      END
+    SQL
+  end
+
+  # Used in an SQL order clause to push tools that match the condition to the front of the relation.
+  def self.sort_by_sql_string(condition)
+    "CASE WHEN #{condition} THEN 1 ELSE 2 END"
+  end
+
+  # Given a collection of tools, finds the first tool that matches the given conditions.
+  #
+  # First only loads non-duplicate tools into memory for matching, then will load
+  # all tools if necessary.
+  def self.find_tool_match(tool_collection, matcher, matcher_condition)
+    possible_match = tool_collection.not_duplicate.find do |tool|
+      matcher_condition.call(tool) && matcher.call(tool)
+    end
+
+    # an LTI 1.1 non-duplicate match means we still need to search
+    # all tools since a 1.3 match with 'duplicate' identity_hash
+    # still takes precedence
+    return possible_match if possible_match&.use_1_3?
+
+    tool_collection.find do |tool|
+      matcher_condition.call(tool) && matcher.call(tool)
+    end
   end
 
   scope :having_setting, lambda { |setting|
@@ -1047,17 +1125,15 @@ class ContextExternalTool < ActiveRecord::Base
 
   scope :placements, lambda { |*placements|
     if placements.present?
-      # Default placements are only applicable to LTI 1.0. Ignore
-      # LTI 1.3 tools with developer_key_id IS NULL
+      # Default placements are only applicable to LTI 1.1
       default_placement_sql = if (placements.map(&:to_s) & Lti::ResourcePlacement::LEGACY_DEFAULT_PLACEMENTS).present?
-                                "(context_external_tools.developer_key_id IS NULL AND
+                                "(context_external_tools.lti_version = '1.1' AND
                            context_external_tools.not_selectable IS NOT TRUE AND
                            ((COALESCE(context_external_tools.url, '') <> '' ) OR
                            (COALESCE(context_external_tools.domain, '') <> ''))) OR "
                               else
                                 ""
                               end
-      return none unless placements
 
       where(default_placement_sql + "EXISTS (?)",
             ContextExternalToolPlacement.where(placement_type: placements)
@@ -1069,7 +1145,7 @@ class ContextExternalTool < ActiveRecord::Base
 
   scope :selectable, -> { where("context_external_tools.not_selectable IS NOT TRUE") }
 
-  scope :visible, lambda { |user, context, session, placements, current_scope = ContextExternalTool.all|
+  scope :visible, lambda { |user, context, session, placements, current_scope = ContextExternalTool.default_scoped.all|
     if context.grants_right?(user, session, :read_as_admin)
       all
     elsif !placements
@@ -1113,8 +1189,13 @@ class ContextExternalTool < ActiveRecord::Base
 
     tool
   end
+
   scope :active, lambda {
     where.not(workflow_state: ["deleted", "disabled"])
+  }
+
+  scope :not_duplicate, lambda {
+    where.not(identity_hash: "duplicate")
   }
 
   def self.find_all_for(context, type)
@@ -1228,7 +1309,7 @@ class ContextExternalTool < ActiveRecord::Base
 
   def prepare_for_ags(matching_1_1_tool_id)
     related_assignments(matching_1_1_tool_id).each do |a|
-      a.prepare_for_ags_if_needed!(self)
+      a.prepare_for_ags_if_needed!(self, use_tool: true)
     end
   end
 
@@ -1266,7 +1347,35 @@ class ContextExternalTool < ActiveRecord::Base
     directly_associated + indirectly_associated
   end
 
+  # Intended to return true only for Instructure-owned tools that have been
+  # properly configured as "internal" tools. Used for some custom variable substitutions.
+  # Will only return true if the launch_url's domain ends with a domain from the allowlist,
+  # or exactly matches a domain from the allowlist.
+  def internal_service?(launch_url)
+    return false unless developer_key&.internal_service?
+    return false unless launch_url
+
+    domain = URI.parse(launch_url).host rescue nil
+    return false unless domain
+
+    internal_tool_domain_allowlist.any? { |d| domain.end_with?(".#{d}") || domain == d }
+  end
+
+  # Used in ContextToolFinder
+  def sort_key
+    [Canvas::ICU.collation_key(name), global_id]
+  end
+
   private
+
+  # Locally and in OSS installations, this can be configured in config/dynamic_settings.yml.
+  # Returns an array of strings, each listing a partial or full domain suffix that is considered "internal".
+  # Domains should not have a preceding ".".
+  # For example, ["instructure.com", "inscloudgate.net", "inseng.net"] in Instructure-deployed production Canvas.
+  def internal_tool_domain_allowlist
+    config = DynamicSettings.find("lti", default_ttl: 2.hours)["internal_tool_domain_allowlist"] || "[]"
+    @internal_tool_domain_allowlist ||= YAML.safe_load(config)
+  end
 
   def check_global_navigation_cache
     if context.is_a?(Account) && context.root_account?

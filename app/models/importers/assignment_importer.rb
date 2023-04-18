@@ -113,6 +113,7 @@ module Importers
       item ||= Assignment.where(context_type: context.class.to_s, context_id: context, migration_id: hash[:migration_id]).first if hash[:migration_id]
       item ||= context.assignments.temp_record # new(:context => context)
 
+      item.updating_user = migration.user
       item.saved_by = :migration
       item.mark_as_importing!(migration)
       master_migration = migration&.for_master_course_import? # propagate null dates only for blueprint syncs
@@ -241,7 +242,7 @@ module Importers
         hash[:assignment_overrides].each do |o|
           next if o[:set_id].to_i == AssignmentOverride::NOOP_MASTERY_PATHS &&
                   o[:set_type] == AssignmentOverride::SET_TYPE_NOOP &&
-                  !context.feature_enabled?(:conditional_release)
+                  !context.conditional_release?
 
           override = item.assignment_overrides.where(o.slice(:set_type, :set_id)).first
           override ||= item.assignment_overrides.build
@@ -258,7 +259,7 @@ module Importers
           migration.add_imported_item(override,
                                       key: [item.migration_id, override.set_type, override.set_id].join("/"))
         end
-        can_restrict = added_overrides || (item.submission_types == "wiki_page" && context.feature_enabled?(:conditional_release))
+        can_restrict = added_overrides || (item.submission_types == "wiki_page" && context.conditional_release?)
         if hash.key?(:only_visible_to_overrides) && can_restrict
           item.only_visible_to_overrides = hash[:only_visible_to_overrides]
         end
@@ -451,7 +452,7 @@ module Importers
             # If no match is found in the first search, fall back on using the tool ID
             # provided in the migration hash if a tool with that ID is present
             # in the destination context.
-            tool ||= ContextExternalTool.all_tools_for(context).find_by(id: tool_id)
+            tool ||= Lti::ContextToolFinder.all_tools_for(context).find_by(id: tool_id)
 
             tag.content_id = tool&.id
           elsif hash[:external_tool_migration_id]

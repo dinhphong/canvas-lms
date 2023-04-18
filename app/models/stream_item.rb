@@ -18,7 +18,6 @@
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 #
 
-require "open_object"
 require "set"
 
 class StreamItem < ActiveRecord::Base
@@ -307,7 +306,7 @@ class StreamItem < ActiveRecord::Base
         end
 
         # touch all the users to invalidate the cache
-        User.where(id: sliced_user_ids).touch_all
+        User.where(id: sliced_user_ids).touch_all_skip_locked
       end
     end
 
@@ -332,9 +331,9 @@ class StreamItem < ActiveRecord::Base
   def self.prepare_object_for_unread(object)
     case object
     when DiscussionEntry
-      ActiveRecord::Associations::Preloader.new.preload(object, :discussion_entry_participants)
+      ActiveRecord::Associations.preload(object, :discussion_entry_participants)
     when DiscussionTopic
-      ActiveRecord::Associations::Preloader.new.preload(object, :discussion_topic_participants)
+      ActiveRecord::Associations.preload(object, :discussion_topic_participants)
     end
   end
 
@@ -399,7 +398,9 @@ class StreamItem < ActiveRecord::Base
       Shard.current.database_server.unguard do
         StreamItem.vacuum
         StreamItemInstance.vacuum
-        ActiveRecord::Base.connection_pool.current_pool.disconnect! unless Rails.env.test?
+        unless Rails.env.test?
+          ActiveRecord::Base.connection_pool.disconnect!
+        end
       end
     end
 

@@ -90,6 +90,11 @@ require "securerandom"
 #           "example": false,
 #           "type": "boolean"
 #         },
+#         "visibility_level": {
+#           "example": "course",
+#           "type": "string",
+#           "description": "Changes who can access the file. Valid options are 'inherit' (the default), 'course', 'institution', and 'public'. Only valid in course endpoints."
+#         },
 #         "thumbnail_url": {
 #           "type": "string"
 #         },
@@ -136,19 +141,20 @@ class FilesController < ApplicationController
   before_action :require_context, except: %i[
     assessment_question_show image_thumbnail show_thumbnail
     create_pending s3_success show api_create api_create_success api_create_success_cors
-    api_show api_index destroy api_update api_file_status public_url api_capture reset_verifier
+    api_show api_index destroy api_update api_file_status public_url api_capture icon_metadata
+    reset_verifier
   ]
 
-  before_action :check_file_access_flags, only: [:show_relative, :show]
+  before_action :open_limited_cors, only: [:show]
   before_action :open_cors, only: %i[
     api_create api_create_success api_create_success_cors show_thumbnail
   ]
 
-  before_action :open_limited_cors, only: [:show]
+  before_action :check_file_access_flags, only: [:show_relative, :show]
 
-  skip_before_action :verify_authenticity_token, only: :api_create
+  skip_before_action :verify_authenticity_token # , only: [:api_create, :show]
   before_action :verify_api_id, only: %i[
-    api_show api_create_success api_file_status api_update destroy reset_verifier
+    api_show api_create_success api_file_status api_update destroy icon_metadata reset_verifier
   ]
 
   include Api::V1::Attachment
@@ -374,7 +380,7 @@ class FilesController < ApplicationController
       return render body: "endpoint does not support #{request.format.symbol}", status: :bad_request
     end
 
-    if authorized_action(@context, @current_user, [:read, *RoleOverride::GRANULAR_FILE_PERMISSIONS]) &&
+    if authorized_action(@context, @current_user, [:read_files, *RoleOverride::GRANULAR_FILE_PERMISSIONS]) &&
        tab_enabled?(@context.class::TAB_FILES)
       @contexts = [@context]
       get_all_pertinent_contexts(include_groups: true, cross_shard: true) if @context == @current_user
@@ -481,6 +487,24 @@ class FilesController < ApplicationController
   #   "user":: the user who uploaded the file or last edited its content
   #   "usage_rights":: copyright and license information for the file (see UsageRights)
   #
+  # @argument replacement_chain_context_type [Optional, String]
+  #   When a user replaces a file during upload, Canvas keeps track of the "replacement chain."
+  #
+  #   Include this parameter if you wish Canvas to follow the replacement chain if the requested
+  #   file was deleted and replaced by another.
+  #
+  #   Must be set to 'course' or 'account'. The "replacement_chain_context_id" parameter must
+  #   also be included.
+  #
+  # @argument replacement_chain_context_id [Optional, Integer]
+  #   When a user replaces a file during upload, Canvas keeps track of the "replacement chain."
+  #
+  #   Include this parameter if you wish Canvas to follow the replacement chain if the requested
+  #   file was deleted and replaced by another.
+  #
+  #   Indicates the context ID Canvas should use when following the "replacement chain." The
+  #   "replacement_chain_context_type" parameter must also be included.
+  #
   # @example_request
   #
   #   curl 'https://<canvas>/api/v1/files/<file_id>' \
@@ -492,13 +516,21 @@ class FilesController < ApplicationController
   # @returns File
   def api_show
     get_context
+
     @attachment = @context ? @context.attachments.not_deleted.find_by(id: params[:id]) : Attachment.not_deleted.find_by(id: params[:id])
+
+    if replacement_chain_context
+      replacement = attachment_or_replacement(replacement_chain_context, params[:id])
+      @attachment ||= replacement if replacement&.available?
+    end
+
     unless @attachment
       render json: { errors: [{ message: "The specified resource does not exist." }] }, status: :not_found
       return
     end
+
     params[:include] = Array(params[:include])
-    if read_allowed(@attachment, @current_user, session, params)
+    if access_allowed(@attachment, @current_user, :read, session, params)
       json = attachment_json(@attachment, @current_user, {}, { include: params[:include], omit_verifier_in_app: !value_to_boolean(params[:use_verifiers]) })
 
       # Add canvadoc session URL if the file is unlocked
@@ -507,6 +539,25 @@ class FilesController < ApplicationController
       )
       render json: json
     end
+  end
+
+  # @API Translate file reference
+  # Get information about a file from a course copy file reference
+  #
+  # @example_request
+  #
+  #   curl https://<canvas>/api/v1/courses/1/files/file_ref/i567b573b77fab13a1a39937c24ae88f2 \
+  #        -H 'Authorization: Bearer <token>'
+  #
+  # @returns File
+  def file_ref
+    get_context
+
+    @attachment = @context.attachments.not_deleted.find_by(migration_id: params[:migration_id])
+    raise ActiveRecord::RecordNotFound unless @attachment
+    return unless authorized_action(@attachment, @current_user, :read)
+
+    render json: attachment_json(@attachment, @current_user, session, params)
   end
 
   def show
@@ -520,11 +571,23 @@ class FilesController < ApplicationController
       # this implicit context magic happens in ApplicationController#get_context
       if @context.nil? || @current_user.nil? || @context == @current_user
         @attachment = Attachment.find(params[:id])
+
+        # Check if a specific context for the relation replacement chain
+        # was set. If so, use it to look up the attachment. This is needed
+        # for some services (like Buttons & Icons) to avoid setting @context
+        # and being redirected
+        if replacement_chain_context && @attachment.deleted?
+          @attachment = attachment_or_replacement(replacement_chain_context, params[:id])
+        end
+
         @context = nil unless @context == @current_user || @context == @attachment.context
         @skip_crumb = true unless @context
       else
-        # NOTE: Attachment#find has special logic to find overwriting files; see FindInContextAssociation
-        @attachment ||= @context.attachments.find(params[:id])
+        @attachment ||= attachment_or_replacement(@context, params[:id])
+      end
+
+      if @attachment.inline_content? && params[:sf_verifier]
+        return redirect_to url_for(params.to_unsafe_h.except(:sf_verifier))
       end
 
       params[:download] ||= params[:preview]
@@ -546,7 +609,7 @@ class FilesController < ApplicationController
         return
       end
 
-      if read_allowed(@attachment, @current_user, session, params)
+      if access_allowed(@attachment, @current_user, :read, session, params)
         @attachment.ensure_media_object
         verifier_checker = Attachments::Verification.new(@attachment)
 
@@ -911,7 +974,17 @@ class FilesController < ApplicationController
 
     model = Object.const_get(params[:context_type])
     @context = model.where(id: params[:context_id]).first
-    @attachment = @context.shard.activate { Attachment.where(context: @context).build }
+
+    @attachment = if params.key?(:precreated_attachment_id)
+                    att = Attachment.find(params[:precreated_attachment_id])
+                    if att.nil?
+                      reject! "Requested to use precreated attachment, but attachment with id #{params[:precreated_attachment_id]} doesn't exist", 422
+                    else
+                      att
+                    end
+                  else
+                    @context.shard.activate { Attachment.where(context: @context).build }
+                  end
 
     # service metadata
     #
@@ -1131,6 +1204,9 @@ class FilesController < ApplicationController
   # @argument hidden [Boolean]
   #   Flag the file as hidden
   #
+  # @argument visibility_level [String]
+  #   Configure which roles can access this file
+  #
   # @example_request
   #
   #   curl -X PUT 'https://<canvas>/api/v1/files/<file_id>' \
@@ -1157,6 +1233,7 @@ class FilesController < ApplicationController
       @attachment.unlock_at = params[:unlock_at] if params.key?(:unlock_at)
       @attachment.locked = value_to_boolean(params[:locked]) if params.key?(:locked)
       @attachment.hidden = value_to_boolean(params[:hidden]) if params.key?(:hidden)
+      @attachment.visibility_level = params[:visibility_level] if params.key?(:visibility_level)
 
       @attachment.set_publish_state_for_usage_rights if @attachment.context.is_a?(Group)
       if !@attachment.locked? && @attachment.locked_changed? && @attachment.usage_rights_id.nil? && @context.respond_to?(:usage_rights_required?) && @context.usage_rights_required?
@@ -1240,6 +1317,86 @@ class FilesController < ApplicationController
       render json: { message: I18n.t("Unauthorized to delete this file") }, status: :unauthorized
     end
   end
+
+  # @API Get icon metadata
+  # Returns the icon maker file attachment metadata
+  #
+  # @example_request
+  #
+  #   curl 'https://<canvas>/api/v1/courses/1/files/1/metadata' \
+  #         -H 'Authorization: Bearer <token>'
+  #
+  # @example_response
+  #
+  #  {
+  #    "type":"image/svg+xml-icon-maker-icons",
+  #    "alt":"",
+  #    "shape":"square",
+  #    "size":"small",
+  #    "color":"#FFFFFF",
+  #    "outlineColor":"#65499D",
+  #    "outlineSize":"large",
+  #    "text":"Hello",
+  #    "textSize":"x-large",
+  #    "textColor":"#65499D",
+  #    "textBackgroundColor":"#FFFFFF",
+  #    "textPosition":"bottom-third",
+  #    "encodedImage":"data:image/svg+xml;base64,PH==",
+  #    "encodedImageType":"SingleColor",
+  #    "encodedImageName":"Health Icon",
+  #    "x":"50%",
+  #    "y":"50%",
+  #    "translateX":-54,
+  #    "translateY":-54,
+  #    "width":108,
+  #    "height":108,
+  #    "transform":"translate(-54,-54)"
+  #  }
+  #
+  def icon_metadata
+    @icon = Attachment.find(params[:id])
+    @icon = attachment_or_replacement(@icon.context, params[:id]) if @icon.deleted? && @icon.replacement_attachment_id.present?
+    return render json: { errors: [{ message: "The specified resource does not exist." }] }, status: :not_found if @icon.deleted?
+    return unless access_allowed(@icon, @current_user, :download, session, params)
+
+    unless @icon.category == Attachment::ICON_MAKER_ICONS
+      return render json: { errors: [{ message: "The requested attachment does not support viewing metadata." }] }, status: :bad_request
+    end
+
+    sax_doc = MetadataSaxDoc.new
+    parser = Nokogiri::XML::SAX::PushParser.new(sax_doc)
+    @icon.open do |chunk|
+      parser << chunk
+      break if sax_doc.metadata_value.present?
+    end
+    sax_doc.metadata_value.present? ? render(json: { name: @icon.display_name }.merge(JSON.parse(sax_doc.metadata_value))) : head(:no_content)
+  end
+
+  class MetadataSaxDoc < Nokogiri::XML::SAX::Document
+    attr_reader :current_value, :metadata_value, :retain_data
+
+    def start_element(name, _attrs)
+      return unless name == "metadata"
+
+      @current_value = ""
+      @retain_data = true
+    end
+
+    def end_element(name)
+      return unless name == "metadata"
+
+      @metadata_value = current_value
+      @retain_data = false
+    end
+
+    def characters(chars)
+      return unless retain_data
+
+      @current_value ||= ""
+      @current_value += chars
+    end
+  end
+  private_constant :MetadataSaxDoc
 
   # @API Reset link verifier
   #
@@ -1329,12 +1486,25 @@ class FilesController < ApplicationController
 
   private
 
+  def attachment_or_replacement(context, id)
+    # NOTE: Attachment#find has special logic to find overwriting files; see FindInContextAssociation
+    context.attachments.find(id)
+  end
+
+  def replacement_chain_context
+    return unless params[:replacement_chain_context_type] == "course"
+    return unless params[:replacement_chain_context_id].present?
+
+    api_find(Course.active, params[:replacement_chain_context_id])
+  end
+
   def log_attachment_access(attachment)
     log_asset_access(attachment, "files", "files")
   end
 
   def open_cors
     headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Credentials"] = "true"
     headers["Access-Control-Allow-Methods"] = "POST, PUT, DELETE, GET, OPTIONS"
     headers["Access-Control-Request-Method"] = "*"
     headers["Access-Control-Allow-Headers"] = "Origin, X-Requested-With, Content-Type, Accept, Authorization, Accept-Encoding"
@@ -1342,25 +1512,26 @@ class FilesController < ApplicationController
 
   def open_limited_cors
     headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Credentials"] = "true"
     headers["Access-Control-Allow-Methods"] = "GET, HEAD"
   end
 
-  def read_allowed(attachment, user, session, params)
+  def access_allowed(attachment, user, access_type, session, params)
     if params[:verifier]
       verifier_checker = Attachments::Verification.new(attachment)
-      return true if verifier_checker.valid_verifier_for_permission?(params[:verifier], :read, session)
+      return true if verifier_checker.valid_verifier_for_permission?(params[:verifier], access_type, session)
     end
 
     submissions = attachment.attachment_associations.where(context_type: "Submission").preload(:context).filter_map(&:context)
-    return true if submissions.any? { |submission| submission.grants_right?(user, session, :read) }
+    return true if submissions.any? { |submission| submission.grants_right?(user, session, access_type) }
 
-    course = api_find(Assignment, params[:assignment_id]).course unless params[:assignment_id].nil?
-    return true if course&.grants_right?(user, session, :read)
+    course = api_find(Assignment, params[:assignment_id]).course if params[:assignment_id].present?
+    return true if course&.grants_right?(user, session, access_type)
 
-    authorized_action(attachment, user, :read)
+    authorized_action(attachment, user, access_type)
   end
 
   def strong_attachment_params
-    params.require(:attachment).permit(:display_name, :locked, :lock_at, :unlock_at, :uploaded_data, :hidden)
+    params.require(:attachment).permit(:display_name, :locked, :lock_at, :unlock_at, :uploaded_data, :hidden, :visibility_level)
   end
 end

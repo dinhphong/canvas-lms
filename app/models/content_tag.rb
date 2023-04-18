@@ -65,7 +65,7 @@ class ContentTag < ActiveRecord::Base
   after_save :clear_discussion_stream_items
   after_save :send_items_to_stream
   after_save :clear_total_outcomes_cache
-  after_save :update_pace_plan_module_items
+  after_save :update_course_pace_module_items
   after_create :update_outcome_contexts
 
   include CustomValidations
@@ -76,7 +76,18 @@ class ContentTag < ActiveRecord::Base
   acts_as_list scope: :context_module
 
   set_policy do
-    given { |user, session| context&.grants_right?(user, session, :manage_content) }
+    #################### Begin legacy permission block #########################
+    given do |user, session|
+      user && !root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context&.grants_right?(user, session, :manage_content)
+    end
+    can :delete
+    ##################### End legacy permission block ##########################
+
+    given do |user, session|
+      user && root_account.feature_enabled?(:granular_permissions_manage_course_content) &&
+        context&.grants_right?(user, session, :manage_course_content_delete)
+    end
     can :delete
   end
 
@@ -700,22 +711,26 @@ class ContentTag < ActiveRecord::Base
     OutcomeFriendlyDescription.active.find_by(context: context, learning_outcome_id: content_id)&.destroy
   end
 
-  def update_pace_plan_module_items
-    course = context.is_a?(Course) ? context : context.try(:course)
-    return unless course
+  def update_course_pace_module_items
+    return if tag_type == "learning_outcome_association"
 
-    course.pace_plans.primary.find_each do |pace_plan|
-      ppmi = pace_plan.pace_plan_module_items.find_by(module_item_id: id)
-      ppmi ||= pace_plan.pace_plan_module_items.create(module_item_id: id, duration: 0) unless deleted?
-      # Pace plans takes over how and when assignment overrides are managed so if we are deleting an assignment from
+    course = context.is_a?(Course) ? context : context.try(:course)
+    return unless course&.account&.feature_enabled?(:course_paces) && course.enable_course_paces
+
+    course.course_paces.published.find_each do |course_pace|
+      cpmi = course_pace.course_pace_module_items.find_by(module_item_id: id)
+      cpmi ||= course_pace.course_pace_module_items.create(module_item_id: id, duration: 0) unless deleted?
+      # Course paces takes over how and when assignment overrides are managed so if we are deleting an assignment from
       # a module we need to reset it back to an untouched state with regards to overrides.
       if deleted?
-        ppmi&.destroy
-        ppmi&.module_item&.assignment&.assignment_overrides&.destroy_all
+        cpmi&.destroy
+        cpmi&.module_item&.assignment&.assignment_overrides&.destroy_all
+      elsif !cpmi.valid?
+        cpmi&.destroy
       end
 
-      # Republish the pace plan if changes were made
-      pace_plan.create_publish_progress if deleted? || ppmi.saved_change_to_id? || saved_change_to_position?
+      # Republish the course pace if changes were made
+      course_pace.create_publish_progress if deleted? || cpmi.destroyed? || cpmi.saved_change_to_id? || saved_change_to_position?
     end
   end
 end

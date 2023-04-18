@@ -30,6 +30,8 @@ module Types
     graphql_name "User"
 
     include SearchHelper
+    include Api::V1::StreamItem
+    include ConversationsHelper
 
     implements GraphQL::Types::Relay::Node
     implements Interfaces::TimestampInterface
@@ -110,14 +112,36 @@ module Types
       argument :order_by, [String],
                "The fields to order the results by",
                required: false
+      argument :exclude_concluded, Boolean,
+               "Whether or not to exclude `completed` enrollments",
+               required: false
     end
 
-    def enrollments(course_id: nil, current_only: false, order_by: [])
+    field :login_id, String, null: true
+    def login_id
+      course = context[:course]
+      return nil unless course
+
+      pseudonym = SisPseudonym.for(
+        object,
+        course,
+        type: :implicit,
+        require_sis: false,
+        root_account: context[:domain_root_account],
+        in_region: true
+      )
+      return nil unless pseudonym && course.grants_right?(context[:current_user], context[:session], :view_user_logins)
+
+      pseudonym.unique_id
+    end
+
+    def enrollments(course_id: nil, current_only: false, order_by: [], exclude_concluded: false)
       course_ids = [course_id].compact
       Loaders::UserCourseEnrollmentLoader.for(
         course_ids: course_ids,
         order_by: order_by,
-        current_only: current_only
+        current_only: current_only,
+        exclude_concluded: exclude_concluded
       ).load(object.id).then do |enrollments|
         (enrollments || []).select do |enrollment|
           object == context[:current_user] ||
@@ -167,14 +191,19 @@ module Types
         load_association(:all_conversations).then do
           conversations_scope = case scope
                                 when "unread"
+                                  InstStatsd::Statsd.increment("inbox.visit.scope.unread.pages_loaded.react")
                                   object.conversations.unread
                                 when "starred"
+                                  InstStatsd::Statsd.increment("inbox.visit.scope.starred.pages_loaded.react")
                                   object.starred_conversations
                                 when "sent"
+                                  InstStatsd::Statsd.increment("inbox.visit.scope.sent.pages_loaded.react")
                                   object.all_conversations.sent
                                 when "archived"
+                                  InstStatsd::Statsd.increment("inbox.visit.scope.archived.pages_loaded.react")
                                   object.conversations.archived
                                 else
+                                  InstStatsd::Statsd.increment("inbox.visit.scope.inbox.pages_loaded.react")
                                   object.conversations.default
                                 end
 
@@ -185,6 +214,17 @@ module Types
           conversations_scope
         end
       end
+    end
+
+    field :total_recipients, Integer, null: false do
+      argument :context, String, required: false
+    end
+    def total_recipients(context: nil)
+      return nil unless object == self.context[:current_user]
+
+      @current_user = object
+
+      normalize_recipients(recipients: context, context_code: context)&.count || 0
     end
 
     field :recipients, RecipientsType, null: true do
@@ -234,7 +274,16 @@ module Types
         end
       end
 
+      can_send_all = if search_context.nil?
+                       false
+                     elsif search_context.is_a?(Course)
+                       search_context.grants_any_right?(object, :send_messages_all)
+                     elsif !search_context.course.nil?
+                       search_context.course.grants_any_right?(object, :send_messages_all)
+                     end
+
       {
+        sendMessagesAll: !!can_send_all,
         contexts_connection: contexts,
         users_connection: users
       }
@@ -302,22 +351,54 @@ module Types
       end
     end
 
-    field :submission_comments_connection, Types::SubmissionCommentType.connection_type, null: true
-    def submission_comments_connection
+    field :viewable_submissions_connection, Types::SubmissionType.connection_type, null: true do
+      description "All submissions with comments that the current_user is able to view"
+      argument :filter, [String], required: false
+    end
+    def viewable_submissions_connection(filter: nil)
       return unless object == current_user
 
-      submission_comments = []
-      stream_item_instances = current_user.visible_stream_item_instances(only_active_courses: true)
+      @current_user = current_user
+      submissions = []
 
-      Shard.partition_by_shard(stream_item_instances, ->(sii) { sii.stream_item_id }) do |shard_stream_items|
-        submission_ids = StreamItem.where(id: shard_stream_items.map(&:stream_item_id),
-                                          asset_type: "Submission")
-                                   .select("asset_id")
-        submission_comments += SubmissionComment.preload(submission: { assignment: :context })
-                                                .where(submission_id: submission_ids)
+      opts = {
+        only_active_courses: true,
+        asset_type: "Submission"
+      }
+
+      filter&.each do |f|
+        matches = f.match(/.*(course|user)_(\d+)/)
+        if matches.present?
+          case matches[1]
+          when "course"
+            opts[:context] = Context.find_by_asset_string(matches[0])
+          when "user"
+            opts[:submission_user_id] = matches[2].to_i
+          end
+        end
+        next
       end
 
-      submission_comments
+      ssi_scope = current_user.visible_stream_item_instances(opts).preload(:stream_item)
+      is_cross_shard = current_user.visible_stream_item_instances(opts).where("stream_item_id > ?", Shard::IDS_PER_SHARD).exists?
+      if is_cross_shard
+        # the old join doesn't work for cross-shard stream items, so we basically have to pre-calculate everything
+        ssi_scope = ssi_scope.where(stream_item_id: filtered_stream_item_ids(opts))
+      else
+        ssi_scope = ssi_scope.eager_load(:stream_item).where("stream_items.asset_type=?", "Submission")
+        ssi_scope = ssi_scope.joins("INNER JOIN #{Submission.quoted_table_name} ON submissions.id=asset_id")
+        ssi_scope = ssi_scope.where("submissions.workflow_state <> 'deleted' AND submissions.submission_comments_count>0")
+        ssi_scope = ssi_scope.where("submissions.user_id=?", opts[:submission_user_id]) if opts.key?(:submission_user_id)
+      end
+
+      Shard.partition_by_shard(ssi_scope, ->(sii) { sii.stream_item_id }) do |shard_stream_items|
+        submission_ids = StreamItem.where(id: shard_stream_items.map(&:stream_item_id)).pluck(:asset_id)
+        submissions += Submission.where(id: submission_ids)
+      end
+      InstStatsd::Statsd.increment("inbox.visit.scope.submission_comments.pages_loaded.react")
+      submissions.sort_by { |t| t.last_comment_at || t.created_at }.reverse
+    rescue
+      []
     end
 
     field :comment_bank_items_connection, Types::CommentBankItemType.connection_type, null: true do
@@ -344,7 +425,7 @@ module Types
     end
 
     field :course_roles, [String], null: true do
-      argument :course_id, ID, required: false, prepare: GraphQLHelpers.relay_or_legacy_id_prepare_func("Course")
+      argument :course_id, String, required: false
       argument :role_types, [String], "Return only requested base role types", required: false
       argument :built_in_only, Boolean, "Only return default/built_in roles", required: false
     end
@@ -362,7 +443,7 @@ end
 
 module Loaders
   class UserCourseEnrollmentLoader < Loaders::ForeignKeyLoader
-    def initialize(course_ids:, order_by: [], current_only: false)
+    def initialize(course_ids:, order_by: [], current_only: false, exclude_concluded: false)
       scope = Enrollment.joins(:course)
 
       scope = if current_only
@@ -373,6 +454,8 @@ module Loaders
               end
 
       scope = scope.where(course_id: course_ids) if course_ids.present?
+
+      scope = scope.where.not(enrollments: { workflow_state: "completed" }) if exclude_concluded
 
       order_by.each { |o| scope = scope.order(o) }
 
