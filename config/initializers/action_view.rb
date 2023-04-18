@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 #
-# Copyright (C) 2014 - present Instructure, Inc.
+# Copyright (C) 2021 - present Instructure, Inc.
 #
 # This file is part of Canvas.
 #
@@ -17,12 +17,13 @@
 # You should have received a copy of the GNU Affero General Public License along
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 
-Rails.configuration.to_prepare do
-  CanvasKaltura.timeout_protector_proc = proc do |options, &block|
-    Canvas.timeout_protection("kaltura", options, &block)
+module NoLinksHeader
+  # Max header size needs a default, since it's a noop it doesn't matter what
+  def send_preload_links_header(preload_links, max_header_size: 0)
+    # Intentional noop so we don't bload the headers to be too big
   end
-  CanvasKaltura.logger = Rails.logger
-  CanvasKaltura.error_handler = Canvas::Errors
-  CanvasKaltura.cache = -> { Rails.cache }
-  CanvasKaltura.plugin_settings = -> { Canvas::Plugin.find(:kaltura) }
 end
+
+# Directly put it in ActionView::Base in case that has already been loaded
+ActionView::Helpers::AssetTagHelper.prepend(NoLinksHeader)
+ActionView::Base.prepend(NoLinksHeader)

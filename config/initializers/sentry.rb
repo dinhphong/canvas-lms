@@ -31,7 +31,7 @@ Rails.configuration.to_prepare do
     Sentry.init do |config|
       config.dsn = settings[:dsn]
       config.environment = Canvas.environment
-      config.release = Canvas.revision
+      config.release = "canvas-lms@#{Canvas.semver_revision}"
       config.sample_rate = SentryExtensions::Settings.get("sentry_backend_errors_sample_rate", "1.0").to_f
 
       config.traces_sampler = lambda do |sampling_context|
@@ -69,6 +69,9 @@ Rails.configuration.to_prepare do
         Rack::QueryParser::InvalidParameterError
         PG::UnableToSend
       ]
+
+      # Add some dirs to the the default (db, engines, gems, script)-this is combined with the base dir so vendored gems won't be included
+      config.app_dirs_pattern = /(app|bin|config|db|engines|gems|lib|script)/
     end
   end
 

@@ -23,6 +23,18 @@ analytics_2:
       Community.
   after_state_change_proc: analytics_2_after_state_change_hook
   beta: true
+admin_analytics:
+  state: hidden
+  applies_to: RootAccount
+  display_name: Admin Analytics
+  description:
+    wrapper: <a href="https://community.canvaslms.com/t5/New-Analytics-Users/gh-p/analytics">\1</a>
+    admin_analytics_description: Enabling displays Admin Analytics to show overviews of
+      courses and students. Once turned on, it may take data may take 24 hours to appear.
+      Learn more and give feedback by joining the *New Analytics user group* in the Canvas
+      community.
+  after_state_change_proc: analytics_2_after_state_change_hook
+  beta: true
 anonymous_instructor_annotations:
   type: setting
   state: allowed
@@ -57,16 +69,11 @@ compact_live_event_payloads:
   display_name: Remove null values from live event payloads
   description: Canvas will remove keys with null values from live event payloads if
     this feature is enabled.
-conditional_release:
-  type: setting
-  state: allowed
-  display_name: Mastery Paths
-  description: Configure individual learning paths for students based on assessment
-    results.
-  applies_to: Course
-  root_opt_in: true
-  custom_transition_proc: conditional_release_transition_hook
-  after_state_change_proc: conditional_release_after_change_hook
+default_due_time:
+  state: hidden
+  display_name: Default Due Time
+  description: Adds an account/course setting for a default due time for new assignments
+  applies_to: RootAccount
 disable_alert_timeouts:
   type: setting
   state: allowed
@@ -123,12 +130,6 @@ epub_export:
   description: This enables users to generate and download course ePub.
   applies_to: Course
   root_opt_in: true
-feature_flag_filters:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Flags tab updates
-  description: This flag updates the title of the feature flags tab to "Feature Options" and adds
-    a "Feature Preview" pill for feature preview projects.
 featured_help_links:
   state: hidden
   applies_to: SiteAdmin
@@ -265,7 +266,7 @@ new_user_tutorial:
   type: setting
   state: allowed
   display_name: New User Tutorial
-  description: Provide tutorial information for new users in a flyout tray.
+  description: Provide tutorial information for instructors new to Canvas.
   applies_to: RootAccount
   root_opt_in: true
 new_user_tutorial_on_off:
@@ -343,15 +344,6 @@ quizzes_next_submission_history:
     separately.
   applies_to: RootAccount
   root_opt_in: true
-responsive_layout:
-  state: hidden
-  display_name: Responsive Layout
-  description: This is a feature to allow the development of a responsive layout
-  applies_to: RootAccount
-  root_opt_in: true
-  environments:
-    development:
-      state: 'on'
 restrict_students_from_annotating:
   state: allowed
   display_name: Restrict Students from Annotating
@@ -420,9 +412,8 @@ use_semi_colon_field_separators_in_gradebook_exports:
 wrap_calendar_event_titles:
   type: setting
   state: allowed
-  display_name: Wrap event titles in Calendar month view
-  description: Show calendar events in the month view on multiple lines if the title
-    doesn't fit on a single line
+  display_name: event title tooltips in Calendar month view
+  description: Display a tooltip for calendar events if the title doesn't fit on a single line
   applies_to: RootAccount
   root_opt_in: true
 gradebook_show_first_last_names:
@@ -436,3 +427,8 @@ open_todos_in_new_tab:
   state: allowed_on
   display_name: Open to-do items in a new tab
   description: When enabled, this setting automatically opens teacher to-do items in a new tab.
+scheduled_page_publication:
+  applies_to: RootAccount
+  state: hidden
+  display_name: Scheduled page publication
+  description: Allows course pages to be published on a schedule

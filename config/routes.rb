@@ -20,7 +20,7 @@
 full_path_glob = "(/*full_path)"
 
 # allow plugins to prepend routes
-Dir["{gems,vendor}/plugins/*/config/pre_routes.rb"].each do |pre_routes|
+Dir[Rails.root.join("{gems,vendor}/plugins/*/config/pre_routes.rb")].each do |pre_routes|
   load pre_routes
 end
 
@@ -118,7 +118,7 @@ CanvasRails::Application.routes.draw do
         get :quota
         post :reorder
       end
-      get ":file_path" => "files#show_relative", :as => :relative_path, :file_path => /.+/ # needs to stay below react_files route
+      get "*file_path" => "files#show_relative", :as => :relative_path, :file_path => /.+/ # needs to stay below react_files route
     end
   end
 
@@ -127,7 +127,7 @@ CanvasRails::Application.routes.draw do
   end
 
   concern :relative_files do
-    get "file_contents/:file_path" => "files#show_relative", :as => :relative_file_path, :file_path => /.+/
+    get "file_contents/*file_path" => "files#show_relative", :as => :relative_file_path, :file_path => /.+/
   end
 
   concern :folders do
@@ -153,7 +153,7 @@ CanvasRails::Application.routes.draw do
 
   concern :discussions do
     resources :discussion_topics, only: %i[index new show edit destroy]
-    get "discussion_topics/:id/:extras" => "discussion_topics#show", :as => :map, :extras => /.+/
+    get "discussion_topics/:id/*extras" => "discussion_topics#show", :as => :map, :extras => /.+/
     resources :discussion_entries
   end
 
@@ -350,7 +350,6 @@ CanvasRails::Application.routes.draw do
       get :finished
       collection do
         get :retrieve
-        get :homework_submissions
       end
     end
 
@@ -455,7 +454,8 @@ CanvasRails::Application.routes.draw do
       end
     end
 
-    get "pace_plans" => "pace_plans#index"
+    get "blackout_dates" => "blackout_dates#index"
+    get "course_pacing" => "course_paces#index"
 
     post "collapse_all_modules" => "context_modules#toggle_collapse_all"
     resources :content_exports, only: %i[create index destroy show]
@@ -626,6 +626,7 @@ CanvasRails::Application.routes.draw do
         delete :remove_role
       end
     end
+    get "calendar_settings", action: :account_calendar_settings, as: :calendar_settings
 
     scope(controller: :brand_configs) do
       get "theme_editor", action: :new, as: :theme_editor
@@ -645,6 +646,7 @@ CanvasRails::Application.routes.draw do
 
     resources :terms, except: %i[show new edit]
     resources :sub_accounts
+    resources :calendar_events
 
     get :avatars
     get :sis_import
@@ -738,6 +740,8 @@ CanvasRails::Application.routes.draw do
     resources :developer_keys, only: :index
 
     get "release_notes" => "release_notes#manage", :as => :release_notes_manage
+
+    get "blackout_dates" => "blackout_dates#index"
   end
 
   get "images/users/:user_id" => "users#avatar_image", :as => :avatar_image
@@ -945,7 +949,10 @@ CanvasRails::Application.routes.draw do
 
   # Routes for course exports
   get "xsd/:version.xsd" => "content_exports#xml_schema"
-  resources :jobs, only: [:index, :show] do
+
+  get "/jobs", to: "jobs_v2#redirect", as: "jobs"
+
+  resources :jobs_v1, controller: :jobs, only: [:index, :show] do
     collection do
       post "batch_update"
     end
@@ -953,7 +960,7 @@ CanvasRails::Application.routes.draw do
 
   resources :jobs_v2, only: [:index]
 
-  get "equation_images/:id" => "equation_images#show", :as => :equation_images, :id => /.+/
+  get "equation_images/*id" => "equation_images#show", :as => :equation_images, :id => /.+/
 
   # assignments at the top level (without a context) -- we have some specs that
   # assert these routes exist, but just 404 unless it is a download from local
@@ -1025,7 +1032,7 @@ CanvasRails::Application.routes.draw do
       post "courses/:course_id/folders", controller: :folders, action: :create
       get "courses/:course_id/folders/by_path/*full_path", controller: :folders, action: :resolve_path
       get "courses/:course_id/folders/by_path", controller: :folders, action: :resolve_path
-      get "courses/:course_id/folders/buttons_and_icons", controller: :folders, action: :buttons_and_icons_folder
+      get "courses/:course_id/folders/icon_maker", controller: :folders, action: :icon_maker_folder
       get "courses/:course_id/folders/media", controller: :folders, action: :media_folder
       get "courses/:course_id/folders/:id", controller: :folders, action: :show, as: "course_folder"
       get "media_objects", controller: "media_objects", action: :index, as: :media_objects
@@ -1043,6 +1050,15 @@ CanvasRails::Application.routes.draw do
       get "courses/:course_id/permissions", action: :permissions
 
       get "courses/:course_id/student_view_student", action: :student_view_student
+    end
+
+    scope(controller: :account_calendars_api) do
+      get "account_calendars", action: :index, as: :account_calendars
+      get "account_calendars/:account_id", action: :show, as: :account_calendar
+      put "account_calendars/:account_id", action: :update, as: :update_account_calendar
+      put "accounts/:account_id/account_calendars", action: :bulk_update, as: :bulk_update_account_calendars
+      get "accounts/:account_id/account_calendars", action: :all_calendars, as: :all_account_calendars
+      get "accounts/:account_id/visible_calendars_count", action: :visible_calendars_count, as: :visible_calendars_count
     end
 
     scope(controller: :account_notifications) do
@@ -1207,10 +1223,13 @@ CanvasRails::Application.routes.draw do
         post "#{context.pluralize}/:#{context}_id/submissions/update_grades", action: :bulk_update
         put "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/read", action: :mark_submission_read, as: "#{context}_submission_mark_read"
         delete "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/read", action: :mark_submission_unread, as: "#{context}_submission_mark_unread"
+        put "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/read/:item", action: :mark_submission_item_read, as: "#{context}_submission_mark_item_read"
         get "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/document_annotations/read", action: :document_annotations_read_state, as: "#{path_prefix}_submission_document_annotations_read_state"
         put "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/document_annotations/read", action: :mark_document_annotations_read, as: "#{path_prefix}_submission_document_annotations_mark_read"
-        get "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/rubric_comments/read", action: :rubric_comments_read_state, as: "#{path_prefix}_submission_rubric_comments_read_state"
-        put "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/rubric_comments/read", action: :mark_rubric_comments_read, as: "#{path_prefix}_submission_rubric_comments_mark_read"
+        get "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/rubric_comments/read", action: :rubric_assessments_read_state, as: "#{path_prefix}_submission_rubric_comments_read_state"
+        put "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/rubric_comments/read", action: :mark_rubric_assessments_read, as: "#{path_prefix}_submission_rubric_comments_mark_read"
+        get "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/rubric_assessments/read", action: :rubric_assessments_read_state, as: "#{path_prefix}_submission_rubric_assessments_read_state"
+        put "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id/rubric_assessments/read", action: :mark_rubric_assessments_read, as: "#{path_prefix}_submission_rubric_assessments_mark_read"
         get "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions", action: :index, as: "#{path_prefix}_assignment_submissions"
         get "#{context.pluralize}/:#{context}_id/students/submissions", controller: :submissions_api, action: :for_students, as: "#{path_prefix}_student_submissions"
         get "#{context.pluralize}/:#{context}_id/assignments/:assignment_id/submissions/:user_id", action: :show, as: "#{path_prefix}_assignment_submission"
@@ -1473,6 +1492,8 @@ CanvasRails::Application.routes.draw do
 
       get "users/:id/graded_submissions", controller: "users", action: "user_graded_submissions", as: :user_submissions
 
+      get "show_k5_dashboard", controller: "users", action: "show_k5_dashboard"
+
       post "users/:id/clear_cache", action: :clear_cache, as: "clear_cache"
 
       scope(controller: :user_observees) do
@@ -1642,6 +1663,7 @@ CanvasRails::Application.routes.draw do
     scope(controller: :services_api) do
       get "services/kaltura", action: :show_kaltura_config
       post "services/kaltura_session", action: :start_kaltura_session
+      get "services/rce_config", action: :rce_config
     end
 
     scope(controller: :calendar_events_api) do
@@ -1656,6 +1678,7 @@ CanvasRails::Application.routes.draw do
       post "calendar_events/:id/reservations/:participant_id", action: :reserve, as: "calendar_event_reserve"
       get "calendar_events/:id/participants", action: :participants, as: "calendar_event_participants"
       post "calendar_events/save_selected_contexts", action: :save_selected_contexts
+      post "calendar_events/save_enabled_account_calendars", action: :save_enabled_account_calendars
 
       get "courses/:course_id/calendar_events/timetable", action: :get_course_timetable
       post "courses/:course_id/calendar_events/timetable", action: :set_course_timetable
@@ -1707,7 +1730,6 @@ CanvasRails::Application.routes.draw do
 
     scope(controller: :developer_key_account_bindings) do
       post "accounts/:account_id/developer_keys/:developer_key_id/developer_key_account_bindings", action: :create_or_update
-      get "accounts/:account_id/developer_key_account_bindings", action: :index
     end
 
     scope(controller: :developer_keys) do
@@ -1744,6 +1766,7 @@ CanvasRails::Application.routes.draw do
 
       # 'attachment' (rather than 'file') is used below so modules API can use polymorphic_url to generate an item API link
       get "files/:id", action: :api_show, as: "attachment"
+      get "files/:id/icon_metadata", action: :icon_metadata
       delete "files/:id", action: :destroy
       put "files/:id", action: :api_update
       post "files/:id/reset_verifier", action: :reset_verifier
@@ -1765,6 +1788,7 @@ CanvasRails::Application.routes.draw do
 
       get "files/:id/:uuid/status", action: :api_file_status, as: "file_status"
       get "files/:id/public_url", action: :public_url
+      get "courses/:course_id/files/file_ref/:migration_id", action: :file_ref
       %w[course group user].each do |context|
         get "#{context}s/:#{context}_id/files/quota", action: :api_quota
         get "#{context}s/:#{context}_id/files/:id", action: :api_show, as: "#{context}_attachment"
@@ -1799,26 +1823,26 @@ CanvasRails::Application.routes.draw do
       get "groups/:group_id/front_page", action: :show_front_page
       put "courses/:course_id/front_page", action: :update_front_page
       put "groups/:group_id/front_page", action: :update_front_page
-      post "courses/:course_id/pages/:url/duplicate", action: :duplicate
+      post "courses/:course_id/pages/:url_or_id/duplicate", action: :duplicate
 
       get "courses/:course_id/pages", action: :index, as: "course_wiki_pages"
       get "groups/:group_id/pages", action: :index, as: "group_wiki_pages"
-      get "courses/:course_id/pages/:url", action: :show, as: "course_wiki_page"
-      get "groups/:group_id/pages/:url", action: :show, as: "group_wiki_page"
-      get "courses/:course_id/pages/:url/revisions", action: :revisions, as: "course_wiki_page_revisions"
-      get "groups/:group_id/pages/:url/revisions", action: :revisions, as: "group_wiki_page_revisions"
-      get "courses/:course_id/pages/:url/revisions/latest", action: :show_revision
-      get "groups/:group_id/pages/:url/revisions/latest", action: :show_revision
-      get "courses/:course_id/pages/:url/revisions/:revision_id", action: :show_revision
-      get "groups/:group_id/pages/:url/revisions/:revision_id", action: :show_revision
-      post "courses/:course_id/pages/:url/revisions/:revision_id", action: :revert
-      post "groups/:group_id/pages/:url/revisions/:revision_id", action: :revert
+      get "courses/:course_id/pages/:url_or_id", action: :show, as: "course_wiki_page"
+      get "groups/:group_id/pages/:url_or_id", action: :show, as: "group_wiki_page"
+      get "courses/:course_id/pages/:url_or_id/revisions", action: :revisions, as: "course_wiki_page_revisions"
+      get "groups/:group_id/pages/:url_or_id/revisions", action: :revisions, as: "group_wiki_page_revisions"
+      get "courses/:course_id/pages/:url_or_id/revisions/latest", action: :show_revision
+      get "groups/:group_id/pages/:url_or_id/revisions/latest", action: :show_revision
+      get "courses/:course_id/pages/:url_or_id/revisions/:revision_id", action: :show_revision
+      get "groups/:group_id/pages/:url_or_id/revisions/:revision_id", action: :show_revision
+      post "courses/:course_id/pages/:url_or_id/revisions/:revision_id", action: :revert
+      post "groups/:group_id/pages/:url_or_id/revisions/:revision_id", action: :revert
       post "courses/:course_id/pages", action: :create
       post "groups/:group_id/pages", action: :create
-      put "courses/:course_id/pages/:url", action: :update
-      put "groups/:group_id/pages/:url", action: :update
-      delete "courses/:course_id/pages/:url", action: :destroy
-      delete "groups/:group_id/pages/:url", action: :destroy
+      put "courses/:course_id/pages/:url_or_id", action: :update
+      put "groups/:group_id/pages/:url_or_id", action: :update
+      delete "courses/:course_id/pages/:url_or_id", action: :destroy
+      delete "groups/:group_id/pages/:url_or_id", action: :destroy
     end
 
     scope(controller: :context_modules_api) do
@@ -2073,6 +2097,7 @@ CanvasRails::Application.routes.draw do
 
     scope(controller: :progress) do
       get "progress/:id", action: :show, as: "progress"
+      post "progress/:id/cancel", action: :cancel
     end
 
     scope(controller: :app_center) do
@@ -2380,13 +2405,30 @@ CanvasRails::Application.routes.draw do
       put "courses/:course_id/apply_score_to_ungraded_submissions", action: "apply_score_to_ungraded_submissions"
     end
 
-    scope(controller: :pace_plans) do
-      post "courses/:course_id/pace_plans", action: :create
-      get "courses/:course_id/pace_plans/new", action: :new
-      get "courses/:course_id/pace_plans/:id", action: :api_show
-      put "courses/:course_id/pace_plans/:id", action: :update
-      post "courses/:course_id/pace_plans/:id/publish", action: :publish
-      post "courses/:course_id/pace_plans/compress_dates", action: :compress_dates
+    scope(controller: :course_paces) do
+      post "courses/:course_id/course_pacing", action: :create
+      get "courses/:course_id/course_pacing/new", action: :new
+      get "courses/:course_id/course_pacing/:id", action: :api_show
+      put "courses/:course_id/course_pacing/:id", action: :update
+      delete "courses/:course_id/course_pacing/:id", action: :destroy
+      post "courses/:course_id/course_pacing/:id/publish", action: :publish
+      post "courses/:course_id/course_pacing/compress_dates", action: :compress_dates
+    end
+
+    scope(controller: :blackout_dates) do
+      get "courses/:course_id/blackout_dates", action: :index
+      get "accounts/:account_id/blackout_dates", action: :index
+      post "courses/:course_id/blackout_dates", action: :create
+      post "accounts/:account_id/blackout_dates", action: :create
+      get "courses/:course_id/blackout_dates/new", action: :new
+      get "accounts/:account_id/blackout_dates/new", action: :new
+      get "courses/:course_id/blackout_dates/:id", action: :show
+      get "accounts/:account_id/blackout_dates/:id", action: :show
+      put "courses/:course_id/blackout_dates/:id", action: :update
+      put "accounts/:account_id/blackout_dates/:id", action: :update
+      delete "courses/:course_id/blackout_dates/:id", action: :destroy
+      delete "accounts/:account_id/blackout_dates/:id", action: :destroy
+      put "courses/:course_id/blackout_dates", action: :bulk_update
     end
 
     scope(controller: :eportfolios_api) do
@@ -2397,6 +2439,26 @@ CanvasRails::Application.routes.draw do
       put "eportfolios/:eportfolio_id/moderate", action: :moderate
       put "users/:user_id/eportfolios", action: :moderate_all
       put "eportfolios/:eportfolio_id/restore", action: :restore
+    end
+
+    scope(controller: "course_pacing/section_paces_api") do
+      get "courses/:course_id/section_paces", action: :index, as: :section_paces
+      get "courses/:course_id/sections/:course_section_id/pace", action: :show, as: :section_pace
+      post "courses/:course_id/sections/:course_section_id/paces", action: :create, as: :new_section_pace
+      patch "courses/:course_id/sections/:course_section_id/pace", action: :update, as: :patch_section_pace
+      delete "courses/:course_id/sections/:course_section_id/pace", action: :delete, as: :delete_section_pace
+    end
+
+    scope(controller: "course_pacing/student_enrollment_paces_api") do
+      get "courses/:course_id/student_enrollment_paces", action: :index, as: :student_enrollment_paces
+      get "courses/:course_id/student_enrollments/:student_enrollment_id/pace", action: :show, as: :student_enrollment_pace
+      post "courses/:course_id/student_enrollments/:student_enrollment_id/paces", action: :create, as: :new_student_enrollment_pace
+      patch "courses/:course_id/student_enrollments/:student_enrollment_id/pace", action: :update, as: :patch_student_enrollment_pace
+      delete "courses/:course_id/student_enrollments/:student_enrollment_id/pace", action: :delete, as: :delete_student_enrollment_pace
+    end
+
+    scope(controller: "course_pacing/pace_contexts_api") do
+      get "courses/:course_id/pace_contexts", action: :index, as: :pace_contexts
     end
   end
 
@@ -2409,6 +2471,18 @@ CanvasRails::Application.routes.draw do
       get "jobs", action: :index
       get "jobs/:id", action: :show
       post "jobs/batch_update", action: :batch_update
+    end
+
+    # jobs_v2 actually does do regular pagination, but the comments above
+    # otherwise still apply
+    scope(controller: :jobs_v2) do
+      get "jobs2/:bucket/by_:group/search", action: :search
+      get "jobs2/:bucket/by_:group", action: :grouped_info, as: :jobs_grouped_info
+      get "jobs2/:bucket", action: :list, as: :jobs_list, constraints: { bucket: /running|queued|future|failed/ }
+      get "jobs2/:id", action: :lookup, constraints: { id: /\d+/ }
+      post "jobs2/:id/requeue", action: :requeue
+      put "jobs2/manage", action: :manage
+      put "jobs2/unstuck", action: :unstuck
     end
   end
 
@@ -2425,6 +2499,8 @@ CanvasRails::Application.routes.draw do
   get "login/oauth2/deny" => "oauth2_provider#deny", :as => :oauth2_auth_deny
   delete "login/oauth2/token" => "oauth2_provider#destroy", :as => :oauth2_logout
   get "login/oauth2/jwks" => "security#jwks", :as => :oauth2_jwks
+
+  get "post_message_forwarding", controller: "lti/platform_storage", action: :post_message_forwarding, as: :lti_post_message_forwarding
 
   ApiRouteSet.draw(self, "/api/lti/v1") do
     post "tools/:tool_id/grade_passback", controller: :lti_api, action: :grade_passback, as: "lti_grade_passback_api"
@@ -2587,6 +2663,7 @@ CanvasRails::Application.routes.draw do
     end
 
     # LTI Access Tokens (Site Admin only)
+    get "lti_2_token", controller: "lti/token", action: :lti_2_token, as: :lti_2_token_site_admin
     get "advantage_token", controller: "lti/token", action: :advantage_access_token, as: :lti_advantage_token_site_admin
   end
 

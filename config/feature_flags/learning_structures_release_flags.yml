@@ -25,32 +25,44 @@ auto_show_cc:
     Automatically show closed captions in the user's current
     language (if available) when playing canvas media.
   applies_to: User
-k5_parent_support:
-  state: hidden
-  display_name: 'Canvas for Elementary: Parent Support'
-  description: Enables support for observers within Canvas for Elementary.
+confetti_branding:
+  state: 'hidden'
+  display_name: 'Account branding for confetti'
+  description: Applies account branding to confetti splashes
   applies_to: SiteAdmin
-pace_plans:
+course_paces:
   state: hidden
-  display_name: 'Pace Plans'
-  description: Pace Plans adds support for rolling enrollments to Canvas;
-    allowing magical distribution of due dates for students with different
-    start dates based on an instructor's defined pace. Learn more and give
-    feedback by joining the Pace Plans User Group.
+  display_name: 'Course Pacing'
+  description:
+    wrapper: <a href="https://community.canvaslms.com/t5/Course-Pacing-Feature-Preview/gh-p/course_pacing">\1</a>
+    course_paces_description: |-
+      Course Pacing adds support for rolling enrollments to Canvas;
+      allowing magical distribution of due dates for students with different
+      start dates based on an instructor's defined pace. Learn more and give
+      feedback by joining the *Course Pacing User Group*.
   applies_to: Account
   beta: true
-sticky_left_nav:
+  environments:
+    development:
+      state: allowed_on
+    beta:
+      state: allowed_on
+    ci:
+      state: allowed_on
+course_paces_for_sections:
   state: hidden
-  display_name: 'Sticky Left Navigation'
-  description: Turns left-side navigation sidebar sticky.
+  display_name: 'Per Section Course Paces'
+  description: Enable unique course paces for course sections.
   applies_to: SiteAdmin
-notification_settings_course_selector:
-  state: hidden
-  display_name: 'Notification settings: Course selector'
-  description: >-
-    Allows modifying notification settings for any course from within the
-    account-level notification settings page.
-  applies_to: SiteAdmin
+  environments:
+    development:
+      state: allowed_on
+    beta:
+      state: allowed_on
+    ci:
+      state: allowed_on
+    production:
+      state: allowed_on
 create_course_subaccount_picker:
   state: hidden
   applies_to: RootAccount
@@ -60,35 +72,13 @@ create_course_subaccount_picker:
     "Manually Created Courses" sub-account, when enabled, this feature allows
     people who can manually create courses to put those courses into any sub-account
     where they have enrollments.
-  enable_at: "2021-11-20"
-  environments:
-    beta:
-      enable_at: "2021-10-18"
-conferencing_in_planner:
-  state: hidden
+account_calendar_events:
   applies_to: SiteAdmin
-  display_name: Conferencing in planner
-  description: |-
-    When enabled, this flag shows a "Join" button on Canvas calendar
-    events in the student planner
-  enable_at: "2021-11-20"
-  environments:
-    beta:
-      enable_at: "2021-10-18"
-remember_settings_tab:
   state: hidden
-  applies_to: SiteAdmin
-  display_name: Remember your settings page tab
+  display_name: Account-level calendars
   description: |-
-    Keep track of which Settings page tab you are on
-    so the browser's back button takes you to your previous
-    tab, and that refreshing the page will return you to
-    the current active tab.
-  environments:
-    development:
-      state: allowed_on
-    ci:
-      state: allowed_on
+    Allows admins to create events in root- and sub-account calendars that everyone in
+    the account can see.
 submission_feedback_indicators:
   state: allowed
   applies_to: RootAccount
@@ -96,42 +86,41 @@ submission_feedback_indicators:
   description: |-
     Adds visual indicators to the submission details page to tell students that unread
     document annotations or rubric comments exist
-word_count_in_speed_grader:
-  state: hidden
-  applies_to: RootAccount
-  display_name: 'Add word count to SpeedGrader'
-  description: |-
-    When enabled, this flag displays a word count in the speed grader for text
-    based submissions.
-  development:
-    state: allowed_on
-  ci:
-    state: allowed_on
-observer_picker:
-  applies_to: SiteAdmin
-  state: hidden
-  display_name: Filter observer dashboard by student
-  description: |-
-    When enabled, this flag shows a student picker for observers on the dashboard.
 calendar_series:
   applies_to: SiteAdmin
   state: hidden
   display_name: Calendar Series
   description: |-
     This flag allows calendar event series to be created from the Canvas Calendar.
-remember_module_links_default:
+account_level_blackout_dates:
   applies_to: SiteAdmin
   state: hidden
-  display_name: Remember Whether Module Links Load in New Tab
+  display_name: Account-level course pacing blackout dates
   description: |-
-    When adding external links to a module, users can select whether those links should
-    load in a new tab. When this flag is enabled, that checkbox will be selected by default
-    if the user checked it last time they added an external link.
-remember_course_nav_collapsed_state:
+    Allow course pacing blackout dates to be set for accounts instead of just courses.
+render_both_to_do_lists:
   applies_to: SiteAdmin
   state: hidden
-  display_name: Remember Course Navigation Collapsed State
+  display_name: Render both To Do lists for teachers with student enrollments
   description: |-
-    When this flag is enabled, the course navigation will remain collapsed or expanded
-    when navigating between pages depending on how it was last set by the user, instead
-    of defaulting to expanded on most pages.
+    Renders both To Do lists on the dashboard sidebar for teachers with student enrollments.
+course_paces_for_students:
+  state: hidden
+  display_name: 'Per Student Course Paces'
+  description: Enable unique course paces for students.
+  applies_to: SiteAdmin
+course_paces_redesign:
+  state: hidden
+  display_name: 'Course Pacing Redesign'
+  description: Enable the redesigned course pacing user experience.
+  applies_to: SiteAdmin
+deprecate_faculty_journal:
+  state: hidden
+  display_name: 'Faculty Journal Deprecation'
+  description: Enable the deprecation of the faculty journal functionality.
+  applies_to: SiteAdmin
+  environments:
+    ci:
+      state: allowed_on
+    development:
+      state: allowed_on

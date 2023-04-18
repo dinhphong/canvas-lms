@@ -68,8 +68,18 @@ outcomes_friendly_description:
   display_name: Outcomes Friendly Description
   description: Allows users to add a friendly description to outcomes for student and parent view
     in the Student Learning Mastery Gradebook.
-individual_outcome_rating_and_calculation:
+outcome_service_results_to_canvas:
+  state: hidden
+  applies_to: Course
+  display_name: Outcome Service Results to Canvas Reporting
+  description: Allows result data stored in the Outcomes Service to display in Canvas reporting (LMGB, sLMGB and outcome related admin reporting).
+outcome_alignment_summary:
   state: hidden
   applies_to: RootAccount
-  display_name: Individual Outcome Rating and Calculation Method Options
-  description: Allows setting criterion ratings and calculation method options for individual outcomes.
+  display_name: Outcome Alignment Summary Tab
+  description: Provides a list of alignments for each outcome in a course.
+outcome_average_calculation:
+  state: allowed_on
+  applies_to: RootAccount
+  display_name: Outcome Average Calculation Method
+  description: Allows users to use average as a calulcation method for a given outcome.

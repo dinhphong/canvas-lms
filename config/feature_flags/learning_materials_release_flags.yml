@@ -1,32 +1,27 @@
 ---
-rce_mentions_in_discussions:
-  state: hidden
-  display_name: RCE Mentions in Discussions
-  description: |-
-    When enabled, turns on "@mention" functionality in course discussions.
-  applies_to: SiteAdmin
-rce_a11y_checker_notifications:
-  state: allowed
-  display_name: Accessibility Checker Notifications
-  description: |-
-    Show accessibility checker notifications while editing.
-  applies_to: Course
-  root_opt_in: true
 new_equation_editor:
   state: hidden
   display_name: RCE's new and improved equation editor dialog
   description: Includes the equation editor in the @instructure/canvas-rce package
   applies_to: SiteAdmin
 buttons_and_icons_root_account:
-  state: hidden
+  state: allowed
   applies_to: RootAccount
-  display_name: RCE Buttons & Icons
+  display_name: RCE Icon Maker
   description: |-
-    Manage a library of custom buttons and icons from the RCE.
+    Manage a library of custom icons from the RCE.
+  environments:
+    production:
+      state: hidden
 buttons_and_icons_cropper:
   state: hidden
   display_name: Cropper & Associated Features in Buttons & Icons
   description: |-
     When enabled, turns on the Button & Icons image cropper, course images
     source, and upload image source.
+  applies_to: SiteAdmin
+rce_ux_improvements:
+  state: hidden
+  display_name: RCE UX Improvements
+  description: Improve and streamline the RCE button and tray UX
   applies_to: SiteAdmin

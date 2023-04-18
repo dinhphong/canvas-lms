@@ -49,29 +49,43 @@ class PeriodicJobs
     run_at
   end
 
-  def self.with_each_shard_by_database_in_region(klass, method, *args, jitter: nil, local_offset: false)
+  def self.with_each_shard_by_database_in_region(klass, method, *args, jitter: nil, local_offset: false, connection_class: nil)
     callback = -> { Canvas::Errors.capture_exception(:periodic_job, $ERROR_INFO) }
     Shard.with_each_shard(Shard.in_current_region, exception: callback) do
-      strand = "#{klass}.#{method}:#{Shard.current.database_server.id}"
+      current_shard = Shard.current(connection_class)
+      strand = "#{klass}.#{method}:#{current_shard.database_server.id}"
       # TODO: allow this to work with redis jobs
-      next if Delayed::Job == Delayed::Backend::ActiveRecord::Job && Delayed::Job.where(strand: strand, shard_id: Shard.current.id, locked_by: nil).exists?
+      next if Delayed::Job == Delayed::Backend::ActiveRecord::Job && Delayed::Job.where(strand: strand, shard_id: current_shard.id, locked_by: nil).exists?
 
       dj_params = {
         strand: strand,
         priority: 40
       }
       dj_params[:run_at] = compute_run_at(jitter: jitter, local_offset: local_offset)
-      klass.delay(**dj_params).__send__(method, *args)
+
+      current_shard.activate do
+        klass.delay(**dj_params).__send__(method, *args)
+      end
     end
   end
 end
 
+def with_each_job_cluster(klass, method, *args, jitter: nil, local_offset: false)
+  DatabaseServer.send_in_each_region(
+    PeriodicJobs,
+    :with_each_shard_by_database_in_region,
+    { singleton: "periodic:region: #{klass}.#{method}" },
+    klass, method, *args, jitter: jitter, local_offset: local_offset, connection_class: Delayed::Backend::ActiveRecord::AbstractJob
+  )
+end
+
 def with_each_shard_by_database(klass, method, *args, jitter: nil, local_offset: false)
-  DatabaseServer.send_in_each_region(PeriodicJobs,
-                                     :with_each_shard_by_database_in_region,
-                                     {
-                                       singleton: "periodic:region: #{klass}.#{method}",
-                                     }, klass, method, *args, jitter: jitter, local_offset: local_offset)
+  DatabaseServer.send_in_each_region(
+    PeriodicJobs,
+    :with_each_shard_by_database_in_region,
+    { singleton: "periodic:region: #{klass}.#{method}" },
+    klass, method, *args, jitter: jitter, local_offset: local_offset, connection_class: ActiveRecord::Base
+  )
 end
 
 Rails.configuration.after_initialize do
@@ -139,6 +153,13 @@ Rails.configuration.after_initialize do
     end
   end
 
+  Delayed::Periodic.cron "Delayed::Job::Failed.cleanup_old_jobs", "0 * * * *" do
+    cutoff = Setting.get("failed_jobs_retain_for", 3.months.to_s).to_i
+    if cutoff > 0
+      with_each_job_cluster(Delayed::Job::Failed, :cleanup_old_jobs, cutoff.seconds.ago)
+    end
+  end
+
   # Process at 5:30 am local time
   Delayed::Periodic.cron "Alerts::DelayedAlertSender.process", "30 5 * * *", priority: Delayed::LOW_PRIORITY do
     with_each_shard_by_database(Alerts::DelayedAlertSender, :process, local_offset: true)
@@ -177,20 +198,47 @@ Rails.configuration.after_initialize do
     )
   end
 
-  Delayed::Periodic.cron "Auditors::ActiveRecord::Partitioner", "0 0 * * *" do
+  # Partitioner jobs
+  # process and/or create once a day at midnight
+  # prune every Saturday, but only after the first Thursday of the month
+  Delayed::Periodic.cron "Auditors::ActiveRecord::Partitioner.process", "0 0 * * *" do
     with_each_shard_by_database(Auditors::ActiveRecord::Partitioner, :process, jitter: 30.minutes, local_offset: true)
+  end
+
+  Delayed::Periodic.cron "Auditors::ActiveRecord::Partitioner.prune", "0 0 * * 6" do
+    if Time.now.day >= 3
+      with_each_shard_by_database(
+        Auditors::ActiveRecord::Partitioner, :prune, jitter: 30.minutes, local_offset: true
+      )
+    end
   end
 
   Delayed::Periodic.cron "Quizzes::QuizSubmissionEventPartitioner.process", "0 0 * * *" do
     with_each_shard_by_database(Quizzes::QuizSubmissionEventPartitioner, :process, jitter: 30.minutes, local_offset: true)
   end
 
-  Delayed::Periodic.cron "SimplyVersioned::Partitioner.process", "0 0 * * *" do
-    with_each_shard_by_database(SimplyVersioned::Partitioner, :process, jitter: 30.minutes, local_offset: true)
+  Delayed::Periodic.cron "Quizzes::QuizSubmissionEventPartitioner.prune", "0 0 * * 6" do
+    if Time.now.day >= 3
+      with_each_shard_by_database(
+        Quizzes::QuizSubmissionEventPartitioner, :prune, jitter: 30.minutes, local_offset: true
+      )
+    end
   end
 
   Delayed::Periodic.cron "Messages::Partitioner.process", "0 0 * * *" do
     with_each_shard_by_database(Messages::Partitioner, :process, jitter: 30.minutes, local_offset: true)
+  end
+
+  Delayed::Periodic.cron "Messages::Partitioner.prune", "0 0 * * 6" do
+    if Time.now.day >= 3
+      with_each_shard_by_database(
+        Messages::Partitioner, :prune, jitter: 30.minutes, local_offset: true
+      )
+    end
+  end
+
+  Delayed::Periodic.cron "SimplyVersioned::Partitioner.process", "0 0 * * *" do
+    with_each_shard_by_database(SimplyVersioned::Partitioner, :process, jitter: 30.minutes, local_offset: true)
   end
 
   if AuthenticationProvider::SAML.enabled?

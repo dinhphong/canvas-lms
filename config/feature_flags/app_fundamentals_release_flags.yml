@@ -5,6 +5,11 @@ default_recaptcha_registration_enable:
   display_name: Enable Recaptcha by default for self-registration
   description: Requires Recaptcha for self-registration by default
   applies_to: SiteAdmin
+granular_permissions_manage_course_content:
+  state: hidden
+  applies_to: RootAccount
+  display_name: Granular permissions for managing course content
+  description: Add granularity to permissions around managing all other course content
 granular_permissions_manage_courses:
   state: hidden
   applies_to: RootAccount
@@ -46,3 +51,8 @@ granular_permissions_manage_assignments:
   applies_to: RootAccount
   display_name: Granular permissions for assignments and quizzes
   description: Separate out granular add and delete permissions for assignments and quizzes from the existing manage permission that controls all three.
+course_admin_role_masquerade_permission_check:
+  state: allowed
+  applies_to: RootAccount
+  display_name: Check permissions when Masquerading as Course Admins
+  description: When masquerading as Course Admin Roles (Teacher/TA/Designer base role), Canvas will ensure the masquerading user has all of the same (or more) permissions as the target user.

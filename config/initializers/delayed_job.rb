@@ -32,9 +32,8 @@ Delayed::Backend::Base.class_eval do
     account.resolved_root_account_id
   end
 
-  def to_log_format
-    logged_attributes = %i[tag strand priority attempts created_at max_attempts source account_id]
-    log_hash = attributes.with_indifferent_access.slice(*logged_attributes)
+  def log_format_context
+    log_hash = {}
     log_hash[:shard_id] = current_shard&.id
     log_hash[:jobs_cluster] = "NONE"
     if current_shard.respond_to?(:delayed_jobs_shard_id)
@@ -42,7 +41,19 @@ Delayed::Backend::Base.class_eval do
     end
     log_hash[:db_cluster] = current_shard&.database_server&.id
     log_hash[:root_account_id] = Shard.global_id_for(root_account_id)
-    log_hash.with_indifferent_access.to_json
+    log_hash
+  end
+
+  def to_detailed_log_format
+    logged_attributes = %i[tag strand singleton priority attempts created_at max_attempts source account_id]
+    log_hash = attributes.with_indifferent_access.slice(*logged_attributes)
+    log_hash.merge(log_format_context).with_indifferent_access.to_json
+  end
+
+  def to_short_log_format
+    logged_attributes = %i[account_id]
+    log_hash = attributes.with_indifferent_access.slice(*logged_attributes)
+    log_hash.merge(log_format_context).with_indifferent_access.to_json
   end
 end
 
@@ -61,7 +72,8 @@ Delayed::Backend::ActiveRecord::Job.include(Delayed::Backend::DefaultJobAccount)
 
 Delayed::Settings.default_job_options        = -> { { current_shard: Shard.current } }
 Delayed::Settings.fetch_batch_size           = -> { Setting.get("jobs_get_next_batch_size", "5").to_i }
-Delayed::Settings.job_detailed_log_format    = ->(job) { job.to_log_format }
+Delayed::Settings.job_detailed_log_format    = ->(job) { job.to_detailed_log_format }
+Delayed::Settings.job_short_log_format       = ->(job) { job.to_short_log_format }
 Delayed::Settings.max_attempts               = 1
 Delayed::Settings.num_strands                = ->(strand_name) { Setting.get("#{strand_name}_num_strands", nil) }
 Delayed::Settings.pool_procname_suffix       = " (#{Canvas.revision})" if Canvas.revision
@@ -69,11 +81,11 @@ Delayed::Settings.queue                      = "canvas_queue"
 Delayed::Settings.select_random_from_batch   = -> { Setting.get("jobs_select_random", "false") == "true" }
 Delayed::Settings.sleep_delay                = -> { Setting.get("delayed_jobs_sleep_delay", "2.0").to_f }
 Delayed::Settings.sleep_delay_stagger        = -> { Setting.get("delayed_jobs_sleep_delay_stagger", "2.0").to_f }
-Delayed::Settings.worker_procname_prefix     = -> { "#{Shard.current(CANVAS_RAILS6_0 ? :delayed_jobs : Delayed::Backend::ActiveRecord::AbstractJob).id}~" }
+Delayed::Settings.worker_procname_prefix     = -> { "#{Shard.current(Delayed::Backend::ActiveRecord::AbstractJob).id}~" }
 Delayed::Settings.worker_health_check_type   = Delayed::CLI.instance&.config&.dig("health_check", "type")&.to_sym || :none
 Delayed::Settings.worker_health_check_config = Delayed::CLI.instance&.config&.[]("health_check")
 # transitional
-Delayed::Settings.infer_strand_from_singleton = -> { Setting.get("infer_strand_from_singleton", true) == "true" }
+Delayed::Settings.infer_strand_from_singleton = -> { Setting.get("infer_strand_from_singleton", false) == "true" }
 
 # load our periodic_jobs.yml (cron overrides config file)
 Delayed::Periodic.add_overrides(ConfigFile.load("periodic_jobs").dup || {})
@@ -136,6 +148,10 @@ Delayed::Worker.lifecycle.around(:perform) do |worker, job, &block|
   }
 
   LiveEvents.set_context(job.live_events_context)
+
+  Sentry.set_tags({
+                    jobs_cluster: job.current_shard.delayed_jobs_shard&.id
+                  })
 
   HostUrl.reset_cache!
   old_root_account = Attachment.current_root_account

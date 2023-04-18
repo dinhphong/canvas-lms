@@ -18,6 +18,9 @@
       },
       "user_input": "errors_report_scope(all_configured_submissions(start_time, end_time).select(:id).order(:submitted_at => :desc).limit(limit))",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -27,7 +30,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/grade_change_audit_api_controller.rb",
-      "line": 461,
+      "line": 464,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Score.active.joins(:enrollment).preload(:enrollment).where(:course_score => true).where(\"(enrollments.course_id, enrollments.user_id) IN (#{events.reject(&:in_grading_period?).map do\n key = key_from_ids(event.context_id, event.student_id).join(\",\")\n\"(#{key_from_ids(event.context_id, event.student_id).join(\",\")})\"\n end.join(\", \")})\")",
       "render_path": null,
@@ -38,6 +41,9 @@
       },
       "user_input": "events.reject(&:in_grading_period?).map do\n key = key_from_ids(event.context_id, event.student_id).join(\",\")\n\"(#{key_from_ids(event.context_id, event.student_id).join(\",\")})\"\n end.join(\", \")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -87,7 +93,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/quizzes/quiz.rb",
-      "line": 1342,
+      "line": 1363,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Quizzes::QuizSubmission.from(\"( VALUES #{quizzes.map do\n \"(#{q.id})\"\n end.join(\", \")} ) AS s(quiz_id)\")",
       "render_path": null,
@@ -98,6 +104,9 @@
       },
       "user_input": "quizzes.map do\n \"(#{q.id})\"\n end.join(\", \")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -127,7 +136,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/grade_change_audit_api_controller.rb",
-      "line": 449,
+      "line": 452,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Score.active.joins(:enrollment).preload(:enrollment).where(\"(enrollments.course_id, enrollments.user_id, scores.grading_period_id) IN (#{events.select(&:in_grading_period?).map do\n key = key_from_ids(event.context_id, event.student_id, event.grading_period_id).join(\",\")\n\"(#{key_from_ids(event.context_id, event.student_id, event.grading_period_id).join(\",\")})\"\n end.join(\", \")})\")",
       "render_path": null,
@@ -138,6 +147,9 @@
       },
       "user_input": "events.select(&:in_grading_period?).map do\n key = key_from_ids(event.context_id, event.student_id, event.grading_period_id).join(\",\")\n\"(#{key_from_ids(event.context_id, event.student_id, event.grading_period_id).join(\",\")})\"\n end.join(\", \")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -147,7 +159,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "lib/due_date_cacher.rb",
-      "line": 317,
+      "line": 362,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Submission.where(\"(assignment_id, user_id) IN (#{assignment_and_student_id_values(:entries => entries).join(\",\")})\")",
       "render_path": null,
@@ -158,6 +170,9 @@
       },
       "user_input": "assignment_and_student_id_values(:entries => entries).join(\",\")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -187,7 +202,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/assignments_api_controller.rb",
-      "line": 823,
+      "line": 859,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql(\"user_due_date, #{Assignment.best_unicode_collation_key(\"assignments.title\")}, assignment_groups.position, assignments.position, assignments.id\")",
       "render_path": null,
@@ -198,6 +213,9 @@
       },
       "user_input": "Assignment.best_unicode_collation_key(\"assignments.title\")",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -207,7 +225,7 @@
       "check_name": "UnsafeReflection",
       "message": "Unsafe reflection method `const_get` called with model attribute",
       "file": "lib/sis/csv/import_refactored.rb",
-      "line": 231,
+      "line": 228,
       "link": "https://brakemanscanner.org/docs/warning_types/remote_code_execution/",
       "code": "SIS::CSV.const_get(((id or ParallelImporter.find(id)).importer_type.to_sym.to_s.camelcase + \"Importer\"))",
       "render_path": null,
@@ -218,6 +236,9 @@
       },
       "user_input": "ParallelImporter.find(id)",
       "confidence": "Medium",
+      "cwe_id": [
+        470
+      ],
       "note": ""
     },
     {
@@ -238,6 +259,9 @@
       },
       "user_input": "line",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -258,6 +282,32 @@
       },
       "user_input": "assignment_group_columns_to_insert_or_update[:value_names].join(\", \")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
+      "note": ""
+    },
+    {
+      "warning_type": "SQL Injection",
+      "warning_code": 0,
+      "fingerprint": "21efc518929f57de2536d97d99f07d9a7425712d11c77234a089eb24a8de39b6",
+      "check_name": "SQL",
+      "message": "Possible SQL injection",
+      "file": "app/controllers/calendar_events_api_controller.rb",
+      "line": 1245,
+      "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
+      "code": "InstStatsd::Statsd.count(\"account_calendars.modal.enabled_calendars\", params[:enabled_account_calendars].length)",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "CalendarEventsApiController",
+        "method": "save_enabled_account_calendars"
+      },
+      "user_input": "params[:enabled_account_calendars].length",
+      "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -287,7 +337,7 @@
       "check_name": "Send",
       "message": "User controlled method execution",
       "file": "app/controllers/appointment_groups_controller.rb",
-      "line": 581,
+      "line": 575,
       "link": "https://brakemanscanner.org/docs/warning_types/dangerous_send/",
       "code": "send(\"api_v1_appointment_group_#{params[:action]}_url\", @group)",
       "render_path": null,
@@ -298,6 +348,9 @@
       },
       "user_input": "params[:action]",
       "confidence": "High",
+      "cwe_id": [
+        77
+      ],
       "note": ""
     },
     {
@@ -325,9 +378,9 @@
       "warning_code": 24,
       "fingerprint": "2887b918400cce2b4b71a393a03e681e95ad26fc0c99ebe5b9393a66315b1bdb",
       "check_name": "UnsafeReflection",
-      "message": "Unsafe reflection method `constantize` called with model attribute",
+      "message": "Unsafe reflection method `constantize` called on model attribute",
       "file": "gems/plugins/account_reports/spec_canvas/report_spec_helper.rb",
-      "line": 32,
+      "line": 30,
       "link": "https://brakemanscanner.org/docs/warning_types/remote_code_execution/",
       "code": "ErrorReport.last.category.constantize",
       "render_path": null,
@@ -338,6 +391,9 @@
       },
       "user_input": "ErrorReport.last.category",
       "confidence": "Medium",
+      "cwe_id": [
+        470
+      ],
       "note": ""
     },
     {
@@ -387,7 +443,7 @@
       "check_name": "JSONEntityEscape",
       "message": "HTML entities in JSON are not escaped by default",
       "file": "config/environments/production.rb",
-      "line": 738,
+      "line": 749,
       "link": "https://brakemanscanner.org/docs/warning_types/cross-site_scripting/",
       "code": "ActiveSupport.escape_html_entities_in_json = false",
       "render_path": null,
@@ -398,6 +454,9 @@
       },
       "user_input": null,
       "confidence": "Medium",
+      "cwe_id": [
+        79
+      ],
       "note": ""
     },
     {
@@ -427,7 +486,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/assignments_api_controller.rb",
-      "line": 821,
+      "line": 857,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql(\"latest_due_date, #{Assignment.best_unicode_collation_key(\"assignments.title\")}, assignment_groups.position, assignments.position, assignments.id\")",
       "render_path": null,
@@ -438,6 +497,9 @@
       },
       "user_input": "Assignment.best_unicode_collation_key(\"assignments.title\")",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -458,6 +520,9 @@
       },
       "user_input": "like_condition(\"?\", \"'%[' || REPLACE(conversation_participants.root_account_ids, ',', ']%[') || ']%'\", false)",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -467,7 +532,7 @@
       "check_name": "UnsafeReflectionMethods",
       "message": "Unsafe reflection method `method` called with model attribute",
       "file": "app/controllers/grading_periods_controller.rb",
-      "line": 174,
+      "line": 208,
       "link": "https://brakemanscanner.org/docs/warning_types/remote_code_execution/",
       "code": "method(\"#{Account.active.where(:id => GradingPeriodGroup.active.select(:account_id).where(:id => params[:set_id])).take.class.to_s.downcase}_batch_update\")",
       "render_path": null,
@@ -478,6 +543,9 @@
       },
       "user_input": "Account.active.where(:id => GradingPeriodGroup.active.select(:account_id).where(:id => params[:set_id]))",
       "confidence": "Medium",
+      "cwe_id": [
+        470
+      ],
       "note": ""
     },
     {
@@ -523,7 +591,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/assignments_api_controller.rb",
-      "line": 818,
+      "line": 853,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql(\"#{Assignment.best_unicode_collation_key(\"assignments.title\")}, assignment_groups.position, assignments.position, assignments.id\")",
       "render_path": null,
@@ -534,6 +602,9 @@
       },
       "user_input": "Assignment.best_unicode_collation_key(\"assignments.title\")",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -574,6 +645,9 @@
       },
       "user_input": "Submission.needs_grading_conditions",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -597,26 +671,6 @@
       "note": ""
     },
     {
-      "warning_type": "Mass Assignment",
-      "warning_code": 70,
-      "fingerprint": "58ed5eb1b2c3a696a4c3d567b80b70a85f2feb5dadd4a202465778353c843211",
-      "check_name": "MassAssignment",
-      "message": "Specify exact keys allowed for mass assignment instead of using `permit!` which allows any keys",
-      "file": "app/controllers/gradebook_settings_controller.rb",
-      "line": 65,
-      "link": "https://brakemanscanner.org/docs/warning_types/mass_assignment/",
-      "code": "params.require(:gradebook_settings).permit({ :filter_columns_by => ([:context_module_id, :grading_period_id, :assignment_group_id]), :filter_rows_by => ([:section_id, :student_group_id]), :selected_view_options_filters => ([]) }, :enter_grades_as, :show_concluded_enrollments, :show_inactive_enrollments, :show_unpublished_assignments, :student_column_display_as, :student_column_secondary_info, :sort_rows_by_column_id, :sort_rows_by_setting_key, :sort_rows_by_direction, :view_ungraded_as_zero, :colors => ([:late, :missing, :resubmitted, :dropped, :excused])).permit!",
-      "render_path": null,
-      "location": {
-        "type": "method",
-        "class": "GradebookSettingsController",
-        "method": "gradebook_settings_params"
-      },
-      "user_input": null,
-      "confidence": "Medium",
-      "note": ""
-    },
-    {
       "warning_type": "SQL Injection",
       "warning_code": 0,
       "fingerprint": "596653631ef96aa94d15829ede5c50718351c7b9279fbd2bf9b0a139cf06eb31",
@@ -633,6 +687,29 @@
         "method": "s(:self).instfs_attachments_for_root_accounts"
       },
       "user_input": "Account.resolved_root_account_id_sql",
+      "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
+      "note": ""
+    },
+    {
+      "warning_type": "Mass Assignment",
+      "warning_code": 70,
+      "fingerprint": "5976651f66acf7863fe628cb40ae2a2ebb217d3319177e8609b0f2168f91582d",
+      "check_name": "MassAssignment",
+      "message": "Specify exact keys allowed for mass assignment instead of using `permit!` which allows any keys",
+      "file": "app/controllers/gradebook_settings_controller.rb",
+      "line": 69,
+      "link": "https://brakemanscanner.org/docs/warning_types/mass_assignment/",
+      "code": "params.require(:gradebook_settings).permit({ :filter_columns_by => ([:context_module_id, :grading_period_id, :assignment_group_id, :submissions]), :filter_rows_by => ([:section_id, :student_group_id]), :selected_view_options_filters => ([]) }, :enter_grades_as, :hide_assignment_group_totals, :hide_total, :show_concluded_enrollments, :show_inactive_enrollments, :show_unpublished_assignments, :show_separate_first_last_names, :student_column_display_as, :student_column_secondary_info, :sort_rows_by_column_id, :sort_rows_by_setting_key, :sort_rows_by_direction, :view_ungraded_as_zero, :colors => ([:late, :missing, :resubmitted, :dropped, :excused, :extended])).permit!",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "GradebookSettingsController",
+        "method": "gradebook_settings_params"
+      },
+      "user_input": null,
       "confidence": "Medium",
       "note": ""
     },
@@ -663,7 +740,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/outcome_results_controller.rb",
-      "line": 623,
+      "line": 713,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql((User.sortable_name_order_by_clause(User.quoted_table_name) or \"#{User.sortable_name_order_by_clause(User.quoted_table_name)} DESC\"))",
       "render_path": null,
@@ -674,6 +751,9 @@
       },
       "user_input": "User.sortable_name_order_by_clause(User.quoted_table_name)",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": "No user input is passed in"
     },
     {
@@ -694,6 +774,9 @@
       },
       "user_input": "Account.resolved_root_account_id_sql",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -703,7 +786,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/users_controller.rb",
-      "line": 2720,
+      "line": 2817,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "course.submissions.where.not(:assignments => ({ :workflow_state => \"deleted\" })).eager_load(:assignment).where(\"user_id IN (?) AND #{Submission.needs_grading_conditions}\", student_enrollments.map(&:user_id))",
       "render_path": null,
@@ -714,6 +797,9 @@
       },
       "user_input": "Submission.needs_grading_conditions",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -734,6 +820,9 @@
       },
       "user_input": "updated_at",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -775,6 +864,9 @@
       },
       "user_input": null,
       "confidence": "Medium",
+      "cwe_id": [
+        79
+      ],
       "note": ""
     },
     {
@@ -784,7 +876,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/graphql/graphql_postgres_timeout.rb",
-      "line": 33,
+      "line": 32,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "ActiveRecord::Base.connection.execute(\"SET statement_timeout = #{Integer(Setting.get(\"graphql_statement_timeout\", \"60_000\"))}\")",
       "render_path": null,
@@ -795,6 +887,9 @@
       },
       "user_input": "Setting.get(\"graphql_statement_timeout\", \"60_000\")",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -824,7 +919,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "lib/unzip_attachment.rb",
-      "line": 151,
+      "line": 149,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Attachment.where(:id => id_positions.keys).update_all(\"position=CASE #{id_positions.inject([]) do\n memo.tap do\n (m << \"WHEN id=#{id} THEN #{position}\") if id and position\n end\n end.join(\" \")} ELSE position END\")",
       "render_path": null,
@@ -835,6 +930,9 @@
       },
       "user_input": "id_positions.inject([]) do\n memo.tap do\n (m << \"WHEN id=#{id} THEN #{position}\") if id and position\n end\n end.join(\" \")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -856,6 +954,29 @@
       "user_input": "sliced_objs.map do\n \"(#{o.id}, '#{o.class.base_class.name}')\"\n end.join(\",\")",
       "confidence": "Medium",
       "note": ""
+    },
+    {
+      "warning_type": "SQL Injection",
+      "warning_code": 0,
+      "fingerprint": "7b3d84c4242c2d123a87b502f6cc1de154b3c111b3543c7c48f8aa7ad480a3f9",
+      "check_name": "SQL",
+      "message": "Possible SQL injection",
+      "file": "app/models/student_enrollment.rb",
+      "line": 88,
+      "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
+      "code": "Submission.joins(:assignment).where(:user_id => students.map(&:user_id), :workflow_state => \"deleted\", :assignments => ({ :context_id => course_id })).merge(Assignment.active).in_batches.update_all(\"workflow_state = #{DueDateCacher.infer_submission_workflow_state_sql}\")",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "StudentEnrollment",
+        "method": "restore_deleted_submissions_for_enrollments"
+      },
+      "user_input": "DueDateCacher.infer_submission_workflow_state_sql",
+      "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
+      "note": "DueDateCacher.infer_submission_workflow_state_sql is safe"
     },
     {
       "warning_type": "SQL Injection",
@@ -891,6 +1012,9 @@
       },
       "user_input": "Qti.get_conversion_command(File.join(qti_folder, \"qti_2_1\"), qti_folder)",
       "confidence": "Medium",
+      "cwe_id": [
+        77
+      ],
       "note": ""
     },
     {
@@ -940,7 +1064,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/conversation.rb",
-      "line": 790,
+      "line": 795,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "self.class.where([\"(#{col} IS NULL OR #{col} < ?)\", val])",
       "render_path": null,
@@ -951,6 +1075,9 @@
       },
       "user_input": "col",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -960,9 +1087,9 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "lib/score_statistics_generator.rb",
-      "line": 103,
+      "line": 113,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
-      "code": "ScoreStatistic.connection.execute(\"INSERT INTO #{ScoreStatistic.quoted_table_name}\\n  (assignment_id, maximum, minimum, mean, count, created_at, updated_at, root_account_id)\\nVALUES #{bulk_slice.join(\",\")}\\nON CONFLICT (assignment_id)\\nDO UPDATE SET\\n   minimum = excluded.minimum,\\n   maximum = excluded.maximum,\\n   mean = excluded.mean,\\n   count = excluded.count,\\n   updated_at = excluded.updated_at,\\n   root_account_id = #{root_account_id}\\n\")",
+      "code": "ScoreStatistic.connection.execute(\"INSERT INTO #{ScoreStatistic.quoted_table_name}\\n  (assignment_id, maximum, minimum, mean, lower_q, median, upper_q, count, created_at, updated_at, root_account_id)\\nVALUES #{bulk_slice.join(\",\")}\\nON CONFLICT (assignment_id)\\nDO UPDATE SET\\n   minimum = excluded.minimum,\\n   maximum = excluded.maximum,\\n   mean = excluded.mean,\\n   lower_q = excluded.lower_q,\\n   median = excluded.median,\\n   upper_q = excluded.upper_q,\\n   count = excluded.count,\\n   updated_at = excluded.updated_at,\\n   root_account_id = #{root_account_id}\\n\".squish)",
       "render_path": null,
       "location": {
         "type": "method",
@@ -980,7 +1107,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "gems/plugins/account_reports/lib/account_reports/sis_exporter.rb",
-      "line": 969,
+      "line": 968,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "AccountUser.select(\"account_users.*,\\n                  a.sis_source_id AS account_sis_id,\\n                  r.name AS role_name,\\n                  u.name AS user_name\").joins(\"INNER JOIN #{Account.quoted_table_name} a ON account_users.account_id=a.id\\n                 INNER JOIN #{User.quoted_table_name} u ON account_users.user_id=u.id\\n                 INNER JOIN #{Role.quoted_table_name} r ON account_users.role_id=r.id\").where(\"account_users.account_id IN (#{Account.sub_account_ids_recursive_sql(account.id)})\\n                 OR account_users.account_id= :account_id\", :account_id => account.id)",
       "render_path": null,
@@ -991,6 +1118,9 @@
       },
       "user_input": "Account.sub_account_ids_recursive_sql(account.id)",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1000,7 +1130,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/accounts_controller.rb",
-      "line": 1168,
+      "line": 1187,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "AccountReport.from(\"unnest('{#{AccountReport.available_reports.keys.join(\",\")}}'::text[]) report_types (name),\\n                LATERAL (#{@account.account_reports.active.where(\"report_type=name\").most_recent.to_sql}) account_reports \")",
       "render_path": null,
@@ -1011,6 +1141,9 @@
       },
       "user_input": "AccountReport.available_reports.keys",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1031,6 +1164,9 @@
       },
       "user_input": "{ user_id => ({ :current => ({ :dropped => scores[:current][:dropped] }), :final => ({ :dropped => scores[:final][:dropped] }) }) }.map do\n \"WHEN #{user_id} THEN cast('#{dropped.to_json}' as json)\"\n end.join(\" \")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1040,7 +1176,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/assignment_override.rb",
-      "line": 280,
+      "line": 290,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "where(\"#{field}_overridden\" => true)",
       "render_path": null,
@@ -1051,6 +1187,32 @@
       },
       "user_input": "field",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
+      "note": ""
+    },
+    {
+      "warning_type": "SQL Injection",
+      "warning_code": 0,
+      "fingerprint": "a0f1ce90e4aa763c6d7cfdc66b61468e0786329151f922c828db9675c8d66d2a",
+      "check_name": "SQL",
+      "message": "Possible SQL injection",
+      "file": "app/controllers/conversations_controller.rb",
+      "line": 1055,
+      "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
+      "code": "InstStatsd::Statsd.count(\"inbox.conversation.unstarred.legacy\", params[:conversation_ids].length)",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "ConversationsController",
+        "method": "batch_update"
+      },
+      "user_input": "params[:conversation_ids].length",
+      "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1080,7 +1242,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/account_notification.rb",
-      "line": 213,
+      "line": 233,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "AccountNotification.where(\"account_id IN (?) AND start_at <=? AND end_at >=?\", slice_account_ids, (Time.now.utc or Time.now.utc.end_of_day), (Time.now.utc or Time.now.utc.end_of_day).beginning_of_day).order(\"start_at DESC\").preload({ :account => :root_account }, :account_notification_roles => :role).joins(:account).where(\"domain_specific=? OR #{Account.resolved_root_account_id_sql}=?\", false, root_account.id)",
       "render_path": null,
@@ -1091,6 +1253,9 @@
       },
       "user_input": "Account.resolved_root_account_id_sql",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1116,7 +1281,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "lib/submission_search.rb",
-      "line": 112,
+      "line": 111,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql(\"#{User.sortable_name_order_by_clause(\"users\")} #{(\"DESC NULLS LAST\" or \"ASC\")}\")",
       "render_path": null,
@@ -1127,6 +1292,9 @@
       },
       "user_input": "User.sortable_name_order_by_clause(\"users\")",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1136,7 +1304,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/controllers/accounts_controller.rb",
-      "line": 1163,
+      "line": 1182,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "AccountReport.from(\"unnest('{#{AccountReport.available_reports.keys.join(\",\")}}'::text[]) report_types (name),\\n                LATERAL (#{@account.account_reports.active.where(\"report_type=name\").most_recent.complete.to_sql}) account_reports \")",
       "render_path": null,
@@ -1147,6 +1315,9 @@
       },
       "user_input": "AccountReport.available_reports.keys",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1156,7 +1327,7 @@
       "check_name": "Execute",
       "message": "Possible command injection",
       "file": "gems/plugins/qti_exporter/lib/qti/converter.rb",
-      "line": 100,
+      "line": 98,
       "link": "https://brakemanscanner.org/docs/warning_types/command_injection/",
       "code": "`#{Qti.get_conversion_command(Dir.mktmpdir(\"qti_2_1\"), @package_root.root_path)}`",
       "render_path": null,
@@ -1167,6 +1338,9 @@
       },
       "user_input": "Qti.get_conversion_command(Dir.mktmpdir(\"qti_2_1\"), @package_root.root_path)",
       "confidence": "Medium",
+      "cwe_id": [
+        77
+      ],
       "note": ""
     },
     {
@@ -1176,7 +1350,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/user.rb",
-      "line": 1926,
+      "line": 1951,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Course.active.select(\"courses.*, enrollments.type AS primary_enrollment,\\n                  #{Enrollment.type_rank_sql} AS primary_enrollment_rank,\\n                  enrollments.workflow_state AS primary_enrollment_state,\\n                  enrollments.created_at AS primary_enrollment_date\")",
       "render_path": null,
@@ -1187,6 +1361,9 @@
       },
       "user_input": "Enrollment.type_rank_sql",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1216,7 +1393,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 471,
+      "line": 485,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "find_by_sql((((+\"\" << \"SELECT NULL AS #{column.to_s} WHERE EXISTS (SELECT * FROM #{quoted_table_name} WHERE #{column.to_s} IS NULL) UNION ALL (\") << \"WITH RECURSIVE t AS (\\n  SELECT MIN(#{column.to_s}) AS #{column.to_s} FROM #{quoted_table_name}\\n  UNION ALL\\n  SELECT (SELECT MIN(#{column.to_s}) FROM #{quoted_table_name} WHERE #{column.to_s} > t.#{column.to_s})\\n  FROM t\\n  WHERE t.#{column.to_s} IS NOT NULL\\n)\\nSELECT #{column.to_s} FROM t WHERE #{column.to_s} IS NOT NULL\\n\".squish) << \")\"))",
       "render_path": null,
@@ -1227,6 +1404,9 @@
       },
       "user_input": "column",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1236,7 +1416,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "app/models/course.rb",
-      "line": 801,
+      "line": 863,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql(\"CASE WHEN courses.workflow_state='available' THEN 0 ELSE 1 END, #{best_unicode_collation_key(\"name\")}\")",
       "render_path": null,
@@ -1247,6 +1427,9 @@
       },
       "user_input": "best_unicode_collation_key(\"name\")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1256,7 +1439,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 446,
+      "line": 460,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql((ary.each_with_index.inject(+\"CASE \") do\n (((string << \"WHEN #{col} IN (\") << Array(values).map do\n connection.quote(value)\n end.join(\", \")) << \") THEN #{i} \")\n end << \"ELSE #{ary.size} END\"))",
       "render_path": null,
@@ -1267,6 +1450,9 @@
       },
       "user_input": "ary.size",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1287,6 +1473,9 @@
       },
       "user_input": "Qti.get_conversion_command(File.join(dirname, \"qti_2_1\"), dirname)",
       "confidence": "Medium",
+      "cwe_id": [
+        77
+      ],
       "note": ""
     },
     {
@@ -1343,6 +1532,9 @@
       },
       "user_input": "like_error",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1363,6 +1555,9 @@
       },
       "user_input": "Qti.get_conversion_command(out_folder, qti_file)",
       "confidence": "Medium",
+      "cwe_id": [
+        77
+      ],
       "note": ""
     },
     {
@@ -1392,7 +1587,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 483,
+      "line": 497,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql(\"#{column} #{direction.to_s.upcase}#{(\" NULLS FIRST\" or \" NULLS LAST\" if (first_or_last == :last) and (direction == :desc))}\".strip)",
       "render_path": null,
@@ -1403,6 +1598,9 @@
       },
       "user_input": "column",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1412,7 +1610,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "gems/plugins/account_reports/lib/account_reports/course_reports.rb",
-      "line": 82,
+      "line": 80,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "c.attachments.active.sum(\"COALESCE(CASE when size < #{Attachment.minimum_size_for_quota} THEN #{Attachment.minimum_size_for_quota} ELSE size END, 0)\")",
       "render_path": null,
@@ -1423,6 +1621,32 @@
       },
       "user_input": "Attachment.minimum_size_for_quota",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
+      "note": ""
+    },
+    {
+      "warning_type": "SQL Injection",
+      "warning_code": 0,
+      "fingerprint": "d9e3d493be1140161ebc0e6c35909dbef58fb8600f7a54a0213ae38fa6896ec0",
+      "check_name": "SQL",
+      "message": "Possible SQL injection",
+      "file": "app/controllers/conversations_controller.rb",
+      "line": 1054,
+      "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
+      "code": "InstStatsd::Statsd.count(\"inbox.conversation.starred.legacy\", params[:conversation_ids].length)",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "ConversationsController",
+        "method": "batch_update"
+      },
+      "user_input": "params[:conversation_ids].length",
+      "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1468,13 +1692,39 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 847,
+      "line": 896,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "connection.execute(\"CLOSE #{cursor}\")",
       "render_path": null,
       "location": null,
       "user_input": "cursor",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
+      "note": ""
+    },
+    {
+      "warning_type": "SQL Injection",
+      "warning_code": 0,
+      "fingerprint": "ded9e82288e144d1d531650c2d385aa95a6e3688d4d3ca04757c2c3a61db4119",
+      "check_name": "SQL",
+      "message": "Possible SQL injection",
+      "file": "app/controllers/conversations_controller.rb",
+      "line": 1056,
+      "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
+      "code": "InstStatsd::Statsd.count(\"inbox.conversation.unread.legacy\", params[:conversation_ids].length)",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "ConversationsController",
+        "method": "batch_update"
+      },
+      "user_input": "params[:conversation_ids].length",
+      "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1504,7 +1754,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 417,
+      "line": 431,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Arel.sql((unless @collkey.key?(Shard.current.database_server.id) then\n  @collkey ||= {}\n  @collkey[Shard.current.database_server.id] = connection.extension(:pg_collkey).schema\nend\nif collation = (Canvas::ICU.choose_pg12_collation(connection.icu_collations) and false) then\n  \"(#{col} COLLATE #{(Canvas::ICU.choose_pg12_collation(connection.icu_collations) and false)})\"\nelse\n  if schema = connection.extension(:pg_collkey).schema then\n    \"#{connection.extension(:pg_collkey).schema}.collkey(#{col}, '#{Canvas::ICU.locale_for_collation}', false, 3, true)\"\n  else\n    \"CAST(LOWER(replace(#{col}, '\\\\', '\\\\\\\\')) AS bytea)\"\n  end\nend))",
       "render_path": null,
@@ -1515,6 +1765,9 @@
       },
       "user_input": "col",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1524,7 +1777,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 688,
+      "line": 702,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "where(\"#{key}<=? AND #{key}>?\", Shard::IDS_PER_SHARD, 0)",
       "render_path": null,
@@ -1535,6 +1788,9 @@
       },
       "user_input": "key",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1544,7 +1800,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "gems/plugins/account_reports/lib/account_reports/sis_exporter.rb",
-      "line": 712,
+      "line": 717,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "GroupCategory.joins(\"LEFT JOIN #{Course.quoted_table_name} c ON c.id = group_categories.context_id\\n                   AND group_categories.context_type = 'Course'\").joins(\"LEFT JOIN #{Account.quoted_table_name} a ON a.id = group_categories.context_id\\n                   AND group_categories.context_type = 'Account'\").where(\"a.id IN (#{Account.sub_account_ids_recursive_sql(account.id)}) OR a.id=? OR EXISTS (?)\", account, CourseAccountAssociation.where(\"course_id=c.id\").where(:account_id => account))",
       "render_path": null,
@@ -1555,6 +1811,9 @@
       },
       "user_input": "Account.sub_account_ids_recursive_sql(account.id)",
       "confidence": "High",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1564,7 +1823,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "config/initializers/active_record.rb",
-      "line": 1516,
+      "line": 1567,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "connection.select_value(\"SELECT COUNT(*) FROM pg_proc WHERE proname='#{procname}'\")",
       "render_path": null,
@@ -1575,6 +1834,9 @@
       },
       "user_input": "procname",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1584,7 +1846,7 @@
       "check_name": "SQL",
       "message": "Possible SQL injection",
       "file": "lib/due_date_cacher.rb",
-      "line": 328,
+      "line": 373,
       "link": "https://brakemanscanner.org/docs/warning_types/sql_injection/",
       "code": "Submission.where(\"(assignment_id, user_id) IN (#{assignment_and_student_id_values(:entries => entries).join(\",\")})\")",
       "render_path": null,
@@ -1595,6 +1857,9 @@
       },
       "user_input": "assignment_and_student_id_values(:entries => entries).join(\",\")",
       "confidence": "Medium",
+      "cwe_id": [
+        89
+      ],
       "note": ""
     },
     {
@@ -1655,9 +1920,12 @@
       },
       "user_input": "PYTHON_MIGRATION_EXECUTABLE",
       "confidence": "Medium",
+      "cwe_id": [
+        77
+      ],
       "note": ""
     }
   ],
-  "updated": "2022-02-16 09:17:28 -0600",
-  "brakeman_version": "5.2.1"
+  "updated": "2022-10-04 15:43:19 -0500",
+  "brakeman_version": "5.3.1"
 }

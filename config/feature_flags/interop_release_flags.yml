@@ -1,17 +1,4 @@
 ---
-live_event_subscription_webhooks:
-  state: hidden
-  display_name: Live Event Subscription Webhooks
-  description: |-
-    Allow Live Event Subscription to be set to be delivered
-    via HTTPS webhooks
-  applies_to: SiteAdmin
-live_event_lti_documentation:
-  state: hidden
-  display_name: Live Event Tool Documentation
-  description: |-
-    Show embedded documentation in Live Events LTI Tool
-  applies_to: SiteAdmin
 developer_key_support_includes:
   state: hidden
   display_name: Developer Key Include Parameter Support
@@ -27,15 +14,6 @@ site_admin_keys_only:
     Canvas instances where root accounts are on the same shard
     as the site admin account. Behavior in other instances
     already behaved in this way.
-  applies_to: SiteAdmin
-use_oembed_token:
-  type: setting
-  state: hidden
-  display_name: Require signed token for oEmbed
-  description: |-
-    If enabled, oEmbed endpoints will require a
-    tool-generated token to verify the origin
-    of an oEmbed resource request.
   applies_to: SiteAdmin
 disable_graphql_authentication:
   state: hidden
@@ -76,6 +54,12 @@ lti_deep_linking_line_items:
   description: |-
     If enabled, creates assignments from LineItems in deep link messages.
   applies_to: RootAccount
+lti_assignment_page_line_items:
+  state: hidden
+  display_name: LTI Deep Linking Line Items on Assignment edit page
+  description: |-
+    If enabled, creates assignments from LineItems in deep link messages on the assignment edit page.
+  applies_to: RootAccount
 api_auth_error_updates:
   state: hidden
   display_name: Updates to JSON API auth error HTTP code and JSON status field
@@ -85,4 +69,40 @@ api_auth_error_updates:
     Also, when the API returns a unauthenticated or unauthorized JSON error,
     the "status" field will not be localized; it will always be given in
     English.
+  applies_to: SiteAdmin
+no_redirect_on_oauth_token_method:
+  state: hidden
+  display_name: Updates to OAuth 2.0 flow to stop redirecting in the 'token' authentication
+  description: |-
+    If enabled, the OAuth 2.0 will now correctly return 4xx status codes to the
+    requesting client instead of redirecting them to themselves
+  applies_to: SiteAdmin
+  environments:
+    development:
+      state: on
+    ci:
+      state: on
+variable_substitution_numeric_to_string:
+  state: hidden
+  display_name: Returns string values instead of numeric values in variable substitutions
+  description: |-
+    If enabled, variable substitutions will return string values instead of numeric values
+  applies_to: RootAccount
+ags_scores_multiple_files:
+  state: hidden
+  display_name: Allow multiple file AGS submissions to count as only one submission
+  description: |-
+    This feature makes it so that when multiple files are submitted together by
+    a third party tool via the Assignments and Grade Service API they will be
+    grouped as one submission, rather than creating multiple separate submissions.
+  applies_to: RootAccount
+  environments:
+    development:
+      state: on
+lti_tools_from_federated_parents:
+  state: hidden
+  display_name: Show LTI tools from federated parent accounts
+  description: |-
+    If enabled, LTI tools installed in federated parent accounts will be
+    available / visible in child accounts.
   applies_to: SiteAdmin

@@ -17,7 +17,14 @@
 # You should have received a copy of the GNU Affero General Public License along
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 
-require_dependency "host_url"
+class HostUrlContainer
+  mattr_accessor :host_url
+  def self.===(host)
+    # rubocop:disable Style/CaseEquality
+    host_url.===(host)
+    # rubocop:enable Style/CaseEquality
+  end
+end
 
 environment_configuration(defined?(config) && config) do |config|
   # Settings specified here will take precedence over those in config/application.rb
@@ -28,8 +35,8 @@ environment_configuration(defined?(config) && config) do |config|
   config.cache_classes = false
 
   # Show full error reports and disable caching
-  config.consider_all_requests_local = true
-  config.action_controller.perform_caching = false
+  config.consider_all_requests_local = !ActiveModel::Type::Boolean.new.cast(ENV.fetch("SHOW_PRODUCTION_ERRORS", false))
+  config.action_controller.perform_caching = ActiveModel::Type::Boolean.new.cast(ENV.fetch("ACTION_CONTROLLER_CACHING", false))
 
   # run rake js:build to build the optimized JS if set to true
   # ENV['USE_OPTIMIZED_JS']                            = 'true'
@@ -69,7 +76,11 @@ environment_configuration(defined?(config) && config) do |config|
 
   config.eager_load = false
 
-  config.hosts << HostUrl
+  config.hosts << HostUrlContainer
+
+  config.to_prepare do
+    HostUrlContainer.host_url = HostUrl
+  end
 
   # allow docker dev setup to use http proxy
   config.hosts << ENV["VIRTUAL_HOST"] if ENV["VIRTUAL_HOST"]

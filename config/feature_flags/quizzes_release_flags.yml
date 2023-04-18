@@ -5,6 +5,9 @@ new_quizzes_migration:
   description: Allow migration of quizzes during course copy and import
   applies_to: RootAccount
   beta: true
+  environments:
+    production:
+      state: hidden
 new_quizzes_third_party_imports:
   state: allowed
   display_name: New Quizzes third party importing
@@ -18,12 +21,18 @@ migrate_to_new_quizzes_by_default:
   description: Sets the default option for course copy and importing to New Quizzes
   applies_to: RootAccount
   beta: true
+  environments:
+    production:
+      state: hidden
 require_migration_to_new_quizzes:
   state: allowed
   display_name: New Quizzes migration required
   description:  Disable New Quiz importing and migration checkboxes, defaulting them to enabled
   applies_to: RootAccount
   beta: true
+  environments:
+    production:
+      state: hidden
 new_quizzes_modules_support:
   display_name: New Quizzes support for Modules
   description: Improved New Quizzes support with Modules including creating New Quizzes from Modules
@@ -55,3 +64,17 @@ new_quizzes_skip_to_build_module_button:
   description: Provides a button which navigates straight to the Build screen in the kebab menu for New Quizzes items on the Modules page, Assignments page, and Quizzes page.
   applies_to: SiteAdmin
   state: hidden
+new_quizzes_by_default:
+  state: allowed
+  display_name: Default to New Quizzes
+  description: Use New Quizzes as the default quizzing engine. Removes the ability to create classic quizzes.
+  applies_to: Course
+  visible_on: quizzes_next_visible_on_hook
+new_quizzes_allow_service_jwt_refresh:
+  state: hidden
+  display_name: New Quizzes Service JWT Refresh
+  description: Enable New Quizzes to refresh Service JWTs used by RCE
+  applies_to: SiteAdmin
+  environments:
+    development:
+      state: allowed_on

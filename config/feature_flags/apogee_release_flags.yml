@@ -23,11 +23,6 @@ disable_post_to_sis_when_grading_period_closed:
   description:
     If set, turns off post-to-SIS functionality for assignments when their grading period closes.
     Only applies if the "Enable new SIS integration settings" feature is enabled.
-final_grade_override_in_gradebook_history:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Final Grade Override in Gradebook History
-  description: Includes overridden course grades in the Gradebook History.
 responsive_student_grades_page:
   state: hidden
   applies_to: RootAccount
@@ -41,18 +36,6 @@ view_ungraded_as_zero:
   description:
     The Gradebook will factor in ungraded submissions as if they were given a score of zero for
     calculations. This is just a view for the teacher, and does not affect actual scoring.
-import_override_scores_in_gradebook:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Import Override Scores in Gradebook
-  description: Allows the Gradebook importer to recognize and apply changes to override scores.
-gradebook_load_assignments_by_grading_period:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Load Gradebook Assignments by Grading Period
-  description:
-    If set, the Gradebook will chunk out loading of assignments, loading those for the selected
-    grading period first.
 grade_calc_ignore_unposted_anonymous:
   state: hidden
   applies_to: RootAccount
@@ -67,26 +50,6 @@ grade_calc_ignore_unposted_anonymous:
       state: on # enable for local development
     test:
       state: on # enable for the deployed 'test' environment
-use_cloudfront_for_docviewer:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Use CloudFront for DocViewer
-  description: Request that DocViewer use CloudFront for serving pdf assets.
-gradebook_csv_export_order_matches_gradebook_grid:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Gradebook CSV Export Assignment Order Matches the Gradebook Grid
-  description: If set, the order of assignments in Gradebook CSV exports will
-    match the order in the Gradebook grid.
-  environments:
-    ci:
-      state: on # enable for automated testings builds and local testing
-edit_submission_status_from_speedgrader:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Edit Submission Status from Speedgrader
-  description: If set, allows submission status to be changed from inside of
-    Speedgrader
 enhanced_gradebook_filters:
   beta: true
   state: allowed
@@ -97,20 +60,9 @@ enhanced_gradebook_filters:
     wrapper: <a href="https://community.canvaslms.com/t5/Gradebook-Filters/gh-p/Gradebook-Filters">\1</a>
     enhanced_gradebook_filters_description:
       This feature provides enhanced filtering options in the Canvas gradebook. When
-       this flag is enabled, early access to ongoing improvements will be displayed 
-       automatically with every release. For full details, please see the *Gradebook 
-       Filters User Group* in the Canvas Community.
-remove_gradebook_student_search_delay:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Remove Delay for Gradebook Student Search
-  description: If set, removes the delay that normally occurs when searching for students.
-gradebook_assignment_search_and_redesign:
-  state: hidden
-  applies_to: SiteAdmin
-  display_name: Gradebook Assignment Search And Redesign
-  description: Search assignments in Gradebook and new design for assignment
-    and student search
+      this flag is enabled, early access to ongoing improvements will be displayed
+      automatically with every release. For full details, please see the *Gradebook
+      Filters User Group* in the Canvas Community.
 message_observers_of_students_who:
   state: hidden
   applies_to: SiteAdmin
@@ -121,14 +73,62 @@ apply_score_to_ungraded:
   state: hidden
   applies_to: Account
   display_name: Apply Score to Ungraded
-  description: Allows instructors to apply scores to ungraded submissions en masse from assignment 
+  description: Allows instructors to apply scores to ungraded submissions en masse from assignment
     group and Total column menus in the Gradebook.
   environments:
     development:
       state: allowed
-speedgrader_dialog_for_unposted_comments:
+enhanced_grade_statistics:
   state: hidden
   applies_to: SiteAdmin
-  display_name: Draft Comment Warning Modal in SpeedGrader
-  description: Enables modal to warn user when a draft comment is left unposted
-    in SpeedGrader.
+  display_name: Show quartiles for grades and use them for box and whiskers
+  description: Updates the student-facing assignment statistics to include quartiles and makes the
+    box-and-whiskers plot a proper box and whiskers plot.
+submission_comment_emojis:
+  state: hidden
+  display_name: Emojis in Submission Comments
+  description: Adds an emoji picker that allows students and teachers to add emojis to
+    their submission comments.
+  applies_to: Course
+  root_opt_in: true
+  environments:
+    ci:
+      state: allowed_on # enable for automated testings builds and local testing
+    development:
+      state: allowed_on # enable for local development
+updated_mastery_connect_icon:
+  state: hidden
+  applies_to: SiteAdmin
+  display_name: Updated Mastery Connect Icon
+  description: If set, displays updated mastery connect icon
+  environments:
+    ci:
+      state: on # enable for automated testings builds and local testing
+    development:
+      state: on # enable for local development
+    test:
+      state: on # enable for the deployed 'test' environment
+visibility_feedback_student_grades_page:
+  state: hidden
+  applies_to: SiteAdmin
+  display_name: Improve Feedback on Students Grade Page
+  description: Students will be able to more easily recognize when
+    feedback has been provided by an instructor/grader ...
+peer_reviews_for_a2:
+  state: hidden
+  applies_to: Course
+  display_name: Peer Review Support in Assignment Enhancements
+  description: Students will be able to provide feedback on another student's assignment submission
+    using the enhanced assignment view
+originality_reports_for_a2:
+  state: hidden
+  applies_to: SiteAdmin
+  display_name: Originality Reports with Assignment Enhancements
+  description: If set, displays originality reports with Assignment Enhancements turned on
+  environments:
+    ci:
+      state: on # enable for automated testings builds and local testing
+    development:
+      state: on # enable for local development
+    test:
+      state: on # enable for the deployed 'test' environment

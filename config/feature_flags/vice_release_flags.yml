@@ -39,40 +39,12 @@ draft_discussions:
     in the discussions redesign
   applies_to: SiteAdmin
 
-discussions_inline_grading:
-  state: hidden
-  display_name: Discussion Inline Grading
-  description: |-
-    Allows a grader to grade discussions as they read
-  applies_to: SiteAdmin
-
-discussions_reporting:
+discussion_grading_view:
   state: hidden
   beta: true
-  display_name: Discussions Redesign - Reporting
+  display_name: Discussion Redesign Grading View
   description: |-
-    This feature flag enables Discussions Reporting inside the new
-    Discussions Redesign work.
-  applies_to: SiteAdmin
-
-discussion_anonymity:
-  state: hidden
-  beta: false
-  display_name: Discussions/Announcements Redesign - Anonymity
-  description:
-    This feature allows Teachers to create anonymous discussions
-    and allows teachers to enable a course level setting for students
-    to create anonymous discussions
-  applies_to: SiteAdmin
-
-partial_anonymity:
-  state: hidden
-  beta: false
-  display_name: Discussions/Announcements Redesign - Partial Anonymity
-  description:
-    This feature allows Teachers to create partially anonymous discussions.
-    Partially anonymous discussions allow students the choice to respond
-    to a discussion topic anonymously or not.
+    Will allow for graders to grade assigned discussions without leaving discussion page
   applies_to: SiteAdmin
 
 isolated_view:
@@ -81,6 +53,34 @@ isolated_view:
   description: |-
     This feature flag enables Isolated View inside the new
     Discussions Redesign work.
+  applies_to: SiteAdmin
+
+split_screen_view:
+  state: hidden
+  display_name: Discussions Redesign - Split Screen View
+  description: |-
+    This feature flag enables the Split Screen View inside the new
+    Discussions Redesign work.
+  applies_to: SiteAdmin
+
+discussion_create:
+  state: hidden
+  display_name: Discussion Create/Edit Page React Update
+  description: |-
+    This feature flag enables the use of the updated
+    discussion create/edit page
+  applies_to: RootAccount
+
+bbb_modal_update:
+  state: hidden
+  display_name: BBB Modal Update
+  description: |-
+    This update offers enhanced feature functionality for 
+    Big Blue Button Conferences. Users will now be able to enable 
+    the Waiting Room in their conference settings, they'll be able 
+    to add a scheduled conference to their calendar from within a conference, 
+    and they'll be able to update/sync conference attendees as new attendees are 
+    added or removed.
   applies_to: SiteAdmin
 
 react_inbox:
@@ -110,3 +110,10 @@ apollo_caching:
   description: |-
     Allow for Apollo to cache graphQL queries on a users browser to speed up their experience
   applies_to: SiteAdmin
+
+react_people_page:
+  state: hidden
+  display_name: People Page Upgrade
+  description: |-
+    This feature flag enables the React/InstUI and GraphQL People page upgrade.
+  applies_to: RootAccount

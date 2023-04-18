@@ -27,53 +27,12 @@ require "rails/test_unit/railtie"
 
 Bundler.require(*Rails.groups)
 
-# Zeitwerk does not HAVE to be enabled with rails 6
-# Use this environment variable (which may have other file-based ways
-# to trigger it later) in order to determine which autoloader we should
-# use.  The goal is to move to zeitwerk over time.
-# https://guides.rubyonrails.org/autoloading_and_reloading_constants.html
-# One way to set this in development would be to use your docker-compose.override.yml
-# file to pass an env var to the web container:
-#
-#  web:
-#    <<: *BASE
-#    environment:
-#      <<: *BASE-ENV
-#      VIRTUAL_HOST: .canvas.docker
-#      ...
-#      CANVAS_ZEITWERK: 1
-unless defined?(CANVAS_ZEITWERK)
-  # choose to force zeitwerk on
-  # unless overridden with
-  # an env var or file
-  CANVAS_ZEITWERK = if ENV["CANVAS_ZEITWERK"]
-                      (ENV["CANVAS_ZEITWERK"] == "1")
-                    elsif Rails.root && (zw_settings = ConfigFile.load("zeitwerk"))
-                      zw_settings["enabled"]
-                    else
-                      true
-                    end
-end
-
 module CanvasRails
   class Application < Rails::Application
-    # this CANVAS_ZEITWERK constant flag is defined above in this file.
-    # It should be temporary,
-    # and removed once we've fully upgraded to zeitwerk autoloading,
-    # at which point the stuff inside this conditional block should remain.
-    if CANVAS_ZEITWERK
-      config.autoloader = :zeitwerk
+    config.autoloader = :zeitwerk
 
-      # TODO: someday we can use this line, which will NOT
-      # add anything on the autoload paths the actual ruby
-      # $LOAD_PATH because zeitwerk will take care of anything
-      # we autolaod.  This will make ACTUAL require statements
-      # that are necessary work faster because they'll have a smaller
-      # load path to scan.
-      # config.add_autoload_paths_to_load_path = false
-    end
+    config.add_autoload_paths_to_load_path = false
 
-    $LOAD_PATH << config.root.to_s
     config.encoding = "utf-8"
     require "logging_filter"
     config.filter_parameters.concat LoggingFilter.filtered_parameters
@@ -141,6 +100,17 @@ module CanvasRails
 
     config.paths["lib"].eager_load!
     config.paths.add("app/middleware", eager_load: true, autoload_once: true)
+    # The main autoloader should ignore it so the `once` autoloader can happily load it
+    Rails.autoloaders.main.ignore("#{__dir__}/../lib/base")
+    config.paths.add("lib/base", eager_load: true, autoload_once: true)
+    $LOAD_PATH << "#{__dir__}/../lib/base"
+
+    # This needs to be set for things in the `once` autoloader really early
+    Rails.autoloaders.each do |autoloader|
+      autoloader.inflector.inflect(
+        "csv_with_i18n" => "CSVWithI18n"
+      )
+    end
 
     # prevent directory->module inference in these directories from wreaking
     # havoc on the app (e.g. stylesheets/base -> ::Base)
@@ -163,12 +133,6 @@ module CanvasRails
       require_dependency "canvas/plugins/default_plugins"
       Canvas::Plugins::DefaultPlugins.apply_all
       ActiveSupport::JSON::Encoding.escape_html_entities_in_json = true
-
-      if CANVAS_RAILS6_0
-        # On rails 6.1, this comes from switchman; on rails 6.0 canvas provides it
-        require_relative "#{__dir__}/../app/models/unsharded_record.rb"
-        Switchman::UnshardedRecord = UnshardedRecord
-      end
     end
 
     module PostgreSQLEarlyExtensions
@@ -182,7 +146,7 @@ module CanvasRails
             return super(conn_params)
             # we _shouldn't_ be catching a NoDatabaseError, but that's what Rails raises
             # for an error where the database name is in the message (i.e. a hostname lookup failure)
-            # CANVAS_RAILS6_0 rails 6.1 switches from PG::Error to ActiveRecord::ConnectionNotEstablished
+            # CANVAS_RAILS="6.0" rails 6.1 switches from PG::Error to ActiveRecord::ConnectionNotEstablished
             # for any other error
           rescue ::PG::Error, ::ActiveRecord::NoDatabaseError, ::ActiveRecord::ConnectionNotEstablished
             raise if index == hosts.length - 1
@@ -238,10 +202,43 @@ module CanvasRails
     Autoextend.hook(:"ActiveRecord::ConnectionAdapters::PostgreSQLAdapter",
                     PostgreSQLEarlyExtensions,
                     method: :prepend)
-
     Autoextend.hook(:"ActiveRecord::ConnectionAdapters::PostgreSQL::OID::TypeMapInitializer",
                     TypeMapInitializerExtensions,
                     method: :prepend)
+
+    module RailsCacheShim
+      def delete(key, options = nil)
+        if options&.[](:unprefixed_key)
+          super
+        else
+          SUPPORTED_VERSIONS.any? do |version|
+            super(key, (options || {}).merge(explicit_version: version.delete(".")))
+          end
+        end
+      end
+
+      private
+
+      def namespace_key(key, options)
+        # Purge all rails versions at once if deleting based on a pattern
+        if caller_locations(1, 1).first.base_label == "delete_matched"
+          return "rails??:#{super}"
+        end
+
+        if options&.[](:unprefixed_key)
+          super
+        elsif options&.[](:explicit_version)
+          "rails#{options[:explicit_version]}:#{super}"
+        else
+          "rails#{Rails::VERSION::MAJOR}#{Rails::VERSION::MINOR}:#{super}"
+        end
+      end
+    end
+
+    Autoextend.hook(:"ActiveSupport::Cache::Store",
+                    RailsCacheShim,
+                    method: :prepend)
+
     module PatchThorWarning
       # active_model_serializers should be passing `type: :boolean` here:
       # https://github.com/rails-api/active_model_serializers/blob/v0.9.0.alpha1/lib/active_model/serializer/generators/serializer/scaffold_controller_generator.rb#L10
@@ -327,12 +324,13 @@ module CanvasRails
         # do not remove this conditional until the asset build no longer
         # needs the rails app for anything.
 
+        # Do it early with the wrong cache for things super early in boot
         DynamicSettingsInitializer.bootstrap!
+        # Do it at the end when the autoloader is set up correctly
+        config.to_prepare do
+          DynamicSettingsInitializer.bootstrap!
+        end
       end
-    end
-
-    initializer "canvas.cache_config", before: "canvas.extend_shard" do
-      CanvasCacheInit.apply!
     end
 
     initializer "canvas.extend_shard", before: "active_record.initialize_database" do
